@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snorkel - Time-Series Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-tertiary: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --border: #2a2a4a;
+            --success: #4ade80;
+            --warning: #fbbf24;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .app {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            grid-template-rows: 48px 1fr;
+            height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .view-toggle {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-primary);
+            padding: 4px;
+            border-radius: 6px;
+        }
+
+        .view-toggle button {
+            padding: 6px 16px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .view-toggle button.active {
+            background: var(--accent);
+            color: white;
+        }
+
+        .view-toggle button:hover:not(.active) {
+            background: var(--bg-tertiary);
+        }
+
+        /* Sidebar */
+        .sidebar {
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .sidebar-section {
+            margin-bottom: 20px;
+        }
+
+        .sidebar-section h3 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        select, input[type="text"], input[type="number"], textarea {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+
+        select:focus, input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .checkbox-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .checkbox-item:hover {
+            background: var(--bg-primary);
+        }
+
+        /* Metric rows */
+        .metric-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            background: var(--bg-primary);
+            margin-bottom: 4px;
+        }
+
+        .metric-row input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+
+        .metric-row .metric-agg {
+            width: 70px;
+            padding: 4px 6px;
+            font-size: 11px;
+        }
+
+        .metric-row label {
+            flex: 1;
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+
+        /* Group by rows */
+        .groupby-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            background: var(--bg-primary);
+            margin-bottom: 4px;
+        }
+
+        .groupby-row input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+
+        .groupby-row label {
+            flex: 1;
+            font-size: 13px;
+        }
+
+        .empty-message {
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-style: italic;
+            padding: 8px;
+        }
+
+        .checkbox-item input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+
+        .checkbox-item label {
+            font-size: 13px;
+            cursor: pointer;
+            flex: 1;
+        }
+
+        .checkbox-item select {
+            width: 80px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+
+        /* Filters */
+        .filter-row {
+            display: grid;
+            grid-template-columns: 1fr 80px 1fr 28px;
+            gap: 4px;
+            margin-bottom: 6px;
+            align-items: center;
+            background: var(--bg-primary);
+            padding: 6px;
+            border-radius: 4px;
+        }
+
+        .filter-row select, .filter-row input {
+            padding: 6px 8px;
+            font-size: 12px;
+            width: 100%;
+        }
+
+        .filter-row .filter-col {
+            font-size: 11px;
+        }
+
+        .filter-row .filter-op {
+            font-size: 11px;
+        }
+
+        .filter-row .filter-value {
+            font-size: 12px;
+        }
+
+        .btn-icon {
+            width: 24px;
+            height: 24px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-icon:hover {
+            background: var(--bg-primary);
+            color: var(--accent);
+        }
+
+        .btn-add-filter {
+            width: 100%;
+            padding: 6px;
+            border: 1px dashed var(--border);
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .btn-add-filter:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            background: var(--accent);
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Main content */
+        .main {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chart-controls {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .chart-type-toggle {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-primary);
+            padding: 3px;
+            border-radius: 4px;
+        }
+
+        .chart-type-toggle button {
+            padding: 5px 12px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .chart-type-toggle button.active {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .zoom-info {
+            font-size: 12px;
+            color: var(--text-secondary);
+            flex: 1;
+        }
+
+        .btn-reset {
+            padding: 5px 12px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .btn-reset:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .chart-container {
+            flex: 1;
+            min-height: 350px;
+            padding: 16px;
+            position: relative;
+        }
+
+        #chart {
+            width: 100%;
+            height: 350px;
+            min-height: 350px;
+        }
+
+        /* Samples section */
+        .samples-section {
+            border-top: 1px solid var(--border);
+            background: var(--bg-secondary);
+            max-height: 250px;
+            overflow: auto;
+        }
+
+        .samples-header {
+            padding: 10px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--bg-secondary);
+        }
+
+        .samples-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .samples-table th {
+            text-align: left;
+            padding: 8px 12px;
+            background: var(--bg-primary);
+            font-weight: 500;
+            color: var(--text-secondary);
+            position: sticky;
+            top: 32px;
+        }
+
+        .samples-table td {
+            padding: 6px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .samples-table tr:hover td {
+            background: var(--bg-primary);
+        }
+
+        /* Query mode */
+        .query-mode {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .query-mode.active {
+            display: flex;
+        }
+
+        .visual-mode {
+            display: none;
+        }
+
+        .visual-mode.active {
+            display: block;
+        }
+
+        .query-editor {
+            flex: 1;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .query-editor textarea {
+            flex: 1;
+            min-height: 120px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            resize: none;
+        }
+
+        .query-results {
+            flex: 2;
+            overflow: auto;
+            padding: 16px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Status */
+        .status-bar {
+            padding: 8px 16px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            background: var(--bg-primary);
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .status-bar .success {
+            color: var(--success);
+        }
+
+        .status-bar .error {
+            color: var(--accent);
+        }
+
+        /* Loading */
+        .loading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        /* Table view */
+        .table-view {
+            width: 100%;
+            overflow: auto;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .data-table th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--bg-tertiary);
+            font-weight: 500;
+            position: sticky;
+            top: 0;
+        }
+
+        .data-table td {
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .data-table tr:hover td {
+            background: var(--bg-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <h1><span>~</span> Snorkel</h1>
+            <div class="view-toggle">
+                <button id="btn-visual" class="active">Visual Builder</button>
+                <button id="btn-query">SQL Query</button>
+            </div>
+        </header>
+
+        <aside class="sidebar visual-mode active" id="sidebar-visual">
+            <div class="sidebar-section">
+                <h3>Table</h3>
+                <select id="table-select">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Metrics</h3>
+                <div class="checkbox-group" id="metrics-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Group By</h3>
+                <div class="checkbox-group" id="groupby-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Filters</h3>
+                <div id="filters-list">
+                    <!-- Populated dynamically -->
+                </div>
+                <button class="btn-add-filter" id="btn-add-filter">+ Add Filter</button>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Time Range</h3>
+                <select id="time-range">
+                    <option value="1h">Last 1 hour</option>
+                    <option value="6h">Last 6 hours</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="all">All time</option>
+                </select>
+            </div>
+
+            <div class="sidebar-section">
+                <button class="btn-primary" id="btn-run">Run Query</button>
+            </div>
+        </aside>
+
+        <aside class="sidebar query-mode" id="sidebar-query">
+            <div class="sidebar-section">
+                <h3>Quick Tables</h3>
+                <div class="checkbox-group" id="tables-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+            <div class="sidebar-section">
+                <h3>Example Queries</h3>
+                <div class="checkbox-group" id="example-queries">
+                    <div class="checkbox-item" data-query="SELECT COUNT(*) FROM web_events">
+                        <label>Count all rows</label>
+                    </div>
+                    <div class="checkbox-item" data-query="SELECT event, COUNT(*) FROM web_events GROUP BY event">
+                        <label>Events by type</label>
+                    </div>
+                    <div class="checkbox-item" data-query="SELECT page, AVG(latency_ms) FROM web_events GROUP BY page">
+                        <label>Avg latency by page</label>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main">
+            <div class="visual-mode active" id="visual-content">
+                <div class="chart-controls">
+                    <div class="chart-type-toggle">
+                        <button class="active" data-type="line">Line</button>
+                        <button data-type="bar">Bar</button>
+                        <button data-type="area">Area</button>
+                        <button data-type="table">Table</button>
+                    </div>
+                    <span class="zoom-info" id="zoom-info"></span>
+                    <button class="btn-reset" id="btn-reset-zoom" style="display: none;">Reset Zoom</button>
+                </div>
+
+                <div class="chart-container">
+                    <div id="chart"></div>
+                </div>
+
+                <div class="samples-section">
+                    <div class="samples-header">Sample Data (100 rows)</div>
+                    <table class="samples-table">
+                        <thead id="samples-head"></thead>
+                        <tbody id="samples-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="query-mode" id="query-content">
+                <div class="query-editor">
+                    <textarea id="sql-input" placeholder="SELECT event, COUNT(*) FROM web_events GROUP BY event"></textarea>
+                    <button class="btn-primary" id="btn-execute">Execute Query</button>
+                </div>
+                <div class="query-results">
+                    <table class="data-table">
+                        <thead id="results-head"></thead>
+                        <tbody id="results-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <footer class="status-bar">
+        <span id="status-message">Ready</span>
+        <span id="status-stats"></span>
+    </footer>
+
+    <script src="/ui/query-builder.js"></script>
+    <script src="/ui/chart.js"></script>
+    <script src="/ui/app.js"></script>
+</body>
+</html>
