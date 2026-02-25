@@ -1,6 +1,6 @@
 use crate::data::Value;
 use std::any::Any;
-use std::collections::HashMap;
+use fxhash::FxHashMap as HashMap;
 
 /// Accumulator trait for aggregation functions
 pub trait Accumulator: Send + Sync + AsAny {
