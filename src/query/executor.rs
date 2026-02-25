@@ -1,3 +1,22 @@
+use super::aggregates
+use std::cell::RefCell;
+use crate::data::Value;
+
+// Thread-local pool of reusable row buffers to minimize allocations
+thread_local! {
+    static ROW_BUF_POOL: RefCell<Vec<Vec<Value>>> = RefCell::new(Vec::new());
+}
+
+fn get_row_buf(initial_capacity: usize) -> Vec<Value> {
+    ROW_BUF_POOL.with(|p| p.borrow_mut().pop().unwrap_or_else(|| Vec::with_capacity(initial_capacity)))
+}
+
+fn return_row_buf(buf: Vec<Value>) {
+    ROW_BUF_POOL.with(|p| p.borrow_mut().push(buf));
+}
+
+// End buffer pool setup
+
 use super::aggregates::{create_accumulator, Accumulator};
 use super::parser::FilterOperator;
 use super::planner::{
@@ -119,6 +138,43 @@ fn expand_wildcards(projections: &[ProjectionPlan], table: &Table) -> Vec<Projec
 }
 
 /// Execute a simple scan (no aggregation)
+fn execute_scan(
+    shards: &[Arc<Shard>],
+    plan: &QueryPlan,
+    projections: &[ProjectionPlan],
+) -> Result<(Vec<String>, Vec<Vec<Value>>, usize), ExecuteError> {
+    // Column names for result
+    let columns: Vec<String> = projections
+        .iter()
+        .map(|p| match p {
+            ProjectionPlan::Column { output_name, .. } => output_name.clone(),
+            ProjectionPlan::TimeBucket { output_name, .. } => output_name.clone(),
+            ProjectionPlan::Aggregate { output_name, .. } => output_name.clone(),
+        })
+        .collect();
+
+    let mut rows = Vec::new();
+    let mut rows_scanned = 0;
+    let num_cols = projections.len();
+
+    for shard in shards {
+        for row_idx in shard.row_indices() {
+            rows_scanned += 1;
+            if !passes_filters(shard, row_idx, &plan.filters) {
+                continue;
+            }
+            // Get a reusable buffer for this row
+            let mut buf = get_row_buf(num_cols);
+            buf.clear();
+            for p in projections {
+                buf.push(project_value(shard, row_idx, p));
+            }
+            rows.push(buf);
+        }
+    }
+
+    Ok((columns, rows, rows_scanned))
+}
 fn execute_scan(
     shards: &[Arc<Shard>],
     plan: &QueryPlan,
