@@ -1,27 +1,13 @@
-use std::cell::RefCell;
-
-// Thread-local pool of reusable row buffers to minimize allocations
-thread_local! {
-    static ROW_BUF_POOL: RefCell<Vec<Vec<Value>>> = RefCell::new(Vec::new());
-}
-
-fn get_row_buf(initial_capacity: usize) -> Vec<Value> {
-    ROW_BUF_POOL.with(|p| p.borrow_mut().pop().unwrap_or_else(|| Vec::with_capacity(initial_capacity)))
-}
-
-fn return_row_buf(buf: Vec<Value>) {
-    ROW_BUF_POOL.with(|p| p.borrow_mut().push(buf));
-}
-
-// End buffer pool setup
-
 use super::aggregates::{create_accumulator, Accumulator};
 use super::parser::FilterOperator;
 use super::planner::{
     FilterPlan, GroupByColumnPlan, GroupByPlan, OrderByPlan, ProjectionPlan, QueryPlan,
 };
+use crate::data::column::Column;
 use crate::data::{Shard, Table, Value};
 use crate::storage::StorageEngine;
+use fxhash::FxHashMap;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -151,24 +137,37 @@ fn execute_scan(
         })
         .collect();
 
+    // Parallel shard processing with batch column access
+    let partial_results: Vec<_> = shards
+        .par_iter()
+        .map(|shard| {
+            shard.with_columns(|shard_columns| {
+                let mut local_rows = Vec::new();
+                let mut local_scanned = 0;
+
+                for row_idx in 0..shard.row_count() {
+                    local_scanned += 1;
+                    if !passes_filters_unlocked(shard_columns, row_idx, &plan.filters) {
+                        continue;
+                    }
+                    let row: Vec<Value> = projections
+                        .iter()
+                        .map(|p| project_value_unlocked(shard_columns, row_idx, p))
+                        .collect();
+                    local_rows.push(row);
+                }
+
+                (local_rows, local_scanned)
+            })
+        })
+        .collect();
+
+    // Merge results from all shards
     let mut rows = Vec::new();
     let mut rows_scanned = 0;
-    let num_cols = projections.len();
-
-    for shard in shards {
-        for row_idx in shard.row_indices() {
-            rows_scanned += 1;
-            if !passes_filters(shard, row_idx, &plan.filters) {
-                continue;
-            }
-            // Get a reusable buffer for this row
-            let mut buf = get_row_buf(num_cols);
-            buf.clear();
-            for p in projections {
-                buf.push(project_value(shard, row_idx, p));
-            }
-            rows.push(buf);
-        }
+    for (local_rows, local_scanned) in partial_results {
+        rows.extend(local_rows);
+        rows_scanned += local_scanned;
     }
 
     Ok((columns, rows, rows_scanned))
@@ -187,53 +186,86 @@ fn execute_aggregation(
         })
         .collect();
 
+    // Parallel per-shard aggregation with batch column access
+    let partial_results: Vec<_> = shards
+        .par_iter()
+        .map(|shard| {
+            shard.with_columns(|shard_columns| {
+                let mut local_groups: FxHashMap<Vec<Value>, (Vec<Value>, Vec<Box<dyn Accumulator>>)> =
+                    FxHashMap::default();
+                let mut local_scanned = 0;
+
+                for row_idx in 0..shard.row_count() {
+                    local_scanned += 1;
+
+                    // Apply filters
+                    if !passes_filters_unlocked(shard_columns, row_idx, &plan.filters) {
+                        continue;
+                    }
+
+                    // Compute group key
+                    let group_key = if let Some(ref group_by) = plan.group_by {
+                        compute_group_key_unlocked(shard_columns, row_idx, group_by)
+                    } else {
+                        vec![] // Single global group
+                    };
+
+                    // Get or create accumulators for this group
+                    let (_group_values, accumulators) =
+                        local_groups.entry(group_key.clone()).or_insert_with(|| {
+                            let accs: Vec<Box<dyn Accumulator>> = projections
+                                .iter()
+                                .filter_map(|p| {
+                                    if let ProjectionPlan::Aggregate { function, column, .. } = p {
+                                        Some(create_accumulator(*function, column))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            (group_key, accs)
+                        });
+
+                    // Accumulate values
+                    let mut acc_idx = 0;
+                    for proj in projections {
+                        if let ProjectionPlan::Aggregate { column, .. } = proj {
+                            let value = if let Some(col) = column {
+                                get_value_unlocked(shard_columns, row_idx, col)
+                            } else {
+                                Value::Int64(1) // COUNT(*)
+                            };
+                            accumulators[acc_idx].accumulate(&value);
+                            acc_idx += 1;
+                        }
+                    }
+                }
+
+                (local_groups, local_scanned)
+            })
+        })
+        .collect();
+
+    // Merge partial results from all shards
+    let mut groups: FxHashMap<Vec<Value>, (Vec<Value>, Vec<Box<dyn Accumulator>>)> =
+        FxHashMap::default();
     let mut rows_scanned = 0;
 
-    // Group key -> (group values, accumulators for each aggregation)
-    let mut groups: HashMap<Vec<Value>, (Vec<Value>, Vec<Box<dyn Accumulator>>)> = HashMap::new();
+    for (local_groups, local_scanned) in partial_results {
+        rows_scanned += local_scanned;
 
-    for shard in shards {
-        for row_idx in shard.row_indices() {
-            rows_scanned += 1;
-
-            // Apply filters
-            if !passes_filters(shard, row_idx, &plan.filters) {
-                continue;
-            }
-
-            // Compute group key
-            let group_key = if let Some(ref group_by) = plan.group_by {
-                compute_group_key(shard, row_idx, group_by)
-            } else {
-                vec![] // Single global group
-            };
-
-            // Get or create accumulators for this group
-            let (_group_values, accumulators) = groups.entry(group_key.clone()).or_insert_with(|| {
-                let accs: Vec<Box<dyn Accumulator>> = projections
-                    .iter()
-                    .filter_map(|p| {
-                        if let ProjectionPlan::Aggregate { function, column, .. } = p {
-                            Some(create_accumulator(*function, column))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                (group_key, accs)
-            });
-
-            // Accumulate values
-            let mut acc_idx = 0;
-            for proj in projections {
-                if let ProjectionPlan::Aggregate { column, .. } = proj {
-                    let value = if let Some(col) = column {
-                        shard.get_value(row_idx, col).unwrap_or(Value::Null)
-                    } else {
-                        Value::Int64(1) // COUNT(*)
-                    };
-                    accumulators[acc_idx].accumulate(&value);
-                    acc_idx += 1;
+        for (key, (group_values, local_accs)) in local_groups {
+            match groups.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    // Merge accumulators
+                    let (_, existing_accs) = entry.get_mut();
+                    for (existing_acc, local_acc) in existing_accs.iter_mut().zip(local_accs.iter())
+                    {
+                        existing_acc.merge(local_acc.as_ref());
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((group_values, local_accs));
                 }
             }
         }
@@ -279,11 +311,30 @@ fn execute_aggregation(
     Ok((columns, rows, rows_scanned))
 }
 
-fn passes_filters(shard: &Shard, row_idx: usize, filters: &[FilterPlan]) -> bool {
+fn like_match(s: &str, pattern: &str) -> bool {
+    // Simple LIKE implementation with % wildcard
+    let pattern = pattern.replace('%', ".*").replace('_', ".");
+    regex::Regex::new(&format!("^{}$", pattern))
+        .map(|re| re.is_match(s))
+        .unwrap_or(false)
+}
+
+// Batch column access versions (avoids per-value lock acquisition)
+
+fn get_value_unlocked(columns: &HashMap<String, Column>, row_idx: usize, column: &str) -> Value {
+    columns
+        .get(column)
+        .map(|col| col.get(row_idx))
+        .unwrap_or(Value::Null)
+}
+
+fn passes_filters_unlocked(
+    columns: &HashMap<String, Column>,
+    row_idx: usize,
+    filters: &[FilterPlan],
+) -> bool {
     for filter in filters {
-        let value = shard
-            .get_value(row_idx, &filter.column)
-            .unwrap_or(Value::Null);
+        let value = get_value_unlocked(columns, row_idx, &filter.column);
 
         let passes = match filter.operator {
             FilterOperator::Eq => value == filter.value,
@@ -308,23 +359,20 @@ fn passes_filters(shard: &Shard, row_idx: usize, filters: &[FilterPlan]) -> bool
     true
 }
 
-fn like_match(s: &str, pattern: &str) -> bool {
-    // Simple LIKE implementation with % wildcard
-    let pattern = pattern.replace('%', ".*").replace('_', ".");
-    regex::Regex::new(&format!("^{}$", pattern))
-        .map(|re| re.is_match(s))
-        .unwrap_or(false)
-}
-
-fn project_value(shard: &Shard, row_idx: usize, proj: &ProjectionPlan) -> Value {
+fn project_value_unlocked(
+    columns: &HashMap<String, Column>,
+    row_idx: usize,
+    proj: &ProjectionPlan,
+) -> Value {
     match proj {
-        ProjectionPlan::Column { name, .. } => {
-            shard.get_value(row_idx, name).unwrap_or(Value::Null)
-        }
-        ProjectionPlan::TimeBucket { interval_ms, column, .. } => {
-            let ts = shard
-                .get_value(row_idx, column)
-                .and_then(|v| v.as_i64())
+        ProjectionPlan::Column { name, .. } => get_value_unlocked(columns, row_idx, name),
+        ProjectionPlan::TimeBucket {
+            interval_ms,
+            column,
+            ..
+        } => {
+            let ts = get_value_unlocked(columns, row_idx, column)
+                .as_i64()
                 .unwrap_or(0);
             let bucket = (ts / interval_ms) * interval_ms;
             Value::Timestamp(bucket)
@@ -336,18 +384,19 @@ fn project_value(shard: &Shard, row_idx: usize, proj: &ProjectionPlan) -> Value 
     }
 }
 
-fn compute_group_key(shard: &Shard, row_idx: usize, group_by: &GroupByPlan) -> Vec<Value> {
+fn compute_group_key_unlocked(
+    columns: &HashMap<String, Column>,
+    row_idx: usize,
+    group_by: &GroupByPlan,
+) -> Vec<Value> {
     group_by
         .columns
         .iter()
         .map(|col| match col {
-            GroupByColumnPlan::Column(name) => {
-                shard.get_value(row_idx, name).unwrap_or(Value::Null)
-            }
+            GroupByColumnPlan::Column(name) => get_value_unlocked(columns, row_idx, name),
             GroupByColumnPlan::TimeBucket { interval_ms, column } => {
-                let ts = shard
-                    .get_value(row_idx, column)
-                    .and_then(|v| v.as_i64())
+                let ts = get_value_unlocked(columns, row_idx, column)
+                    .as_i64()
                     .unwrap_or(0);
                 let bucket = (ts / interval_ms) * interval_ms;
                 Value::Timestamp(bucket)
@@ -357,8 +406,8 @@ fn compute_group_key(shard: &Shard, row_idx: usize, group_by: &GroupByPlan) -> V
 }
 
 fn apply_order_by(rows: &mut Vec<Vec<Value>>, columns: &[String], order_by: &[OrderByPlan]) {
-    // Build column index map
-    let col_indices: HashMap<&str, usize> = columns
+    // Build column index map using FxHashMap for faster lookups
+    let col_indices: FxHashMap<&str, usize> = columns
         .iter()
         .enumerate()
         .map(|(i, c)| (c.as_str(), i))

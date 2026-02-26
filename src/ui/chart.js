@@ -4,6 +4,8 @@ const ChartManager = {
     chart: null,
     chartType: 'bar',
     onBrushSelection: null,
+    lastDataLength: 0,
+    zoomDebounceTimer: null,
 
     init(container, onBrushSelection) {
         console.log('ChartManager.init called, container:', container);
@@ -28,6 +30,32 @@ const ChartManager = {
         }
 
         this.onBrushSelection = onBrushSelection;
+
+        // Listen for dataZoom events with debounce to apply zoom after user stops dragging
+        this.chart.on('dataZoom', (params) => {
+            if (!this.lastDataLength || !this.onBrushSelection) return;
+
+            const option = this.chart.getOption();
+            if (!option.dataZoom || !option.dataZoom[0]) return;
+
+            const { start, end } = option.dataZoom[0];
+
+            // Store the current zoom selection
+            this.zoomStart = Math.floor((start / 100) * this.lastDataLength);
+            this.zoomEnd = Math.ceil((end / 100) * this.lastDataLength) - 1;
+            this.isZoomed = (start > 0 || end < 100);
+
+            // Debounce: apply zoom 500ms after user stops dragging
+            if (this.zoomDebounceTimer) {
+                clearTimeout(this.zoomDebounceTimer);
+            }
+
+            if (this.isZoomed) {
+                this.zoomDebounceTimer = setTimeout(() => {
+                    this.onBrushSelection(this.zoomStart, this.zoomEnd);
+                }, 500);
+            }
+        });
 
         window.addEventListener('resize', () => {
             if (this.chart) this.chart.resize();
@@ -72,6 +100,8 @@ const ChartManager = {
             this.showEmpty();
             return;
         }
+
+        this.lastDataLength = rows.length;
 
         if (this.chartType === 'table') {
             this.showTableView();
@@ -198,18 +228,21 @@ const ChartManager = {
         };
     },
 
-    // Pivoted line chart: first dimension = X-axis, second dimension = separate lines
+    // Pivoted line chart: first dimension = X-axis, remaining dimensions = separate lines
     buildPivotedLineChart(rows, dimensions, metrics) {
         const xDim = dimensions[0];
-        const seriesDim = dimensions[1];
+        const seriesDims = dimensions.slice(1); // All dimensions after the first become series
         const metric = metrics[0]; // Use first metric for Y values
+
+        // Helper to build series key from all non-X dimensions
+        const getSeriesKey = (row) => seriesDims.map(d => String(row[d.idx])).join(' | ');
 
         // Get unique X values and series values
         const xValuesSet = new Set();
         const seriesValuesSet = new Set();
         rows.forEach(r => {
             xValuesSet.add(r[xDim.idx]); // Keep raw value for sorting
-            seriesValuesSet.add(String(r[seriesDim.idx]));
+            seriesValuesSet.add(getSeriesKey(r));
         });
 
         // Sort X values (important for timestamps)
@@ -218,13 +251,13 @@ const ChartManager = {
             xValues.sort((a, b) => a - b);
         }
         const xLabels = xValues.map(v => xDim.isTimestamp ? this.formatTimestamp(v) : String(v));
-        const seriesValues = Array.from(seriesValuesSet);
+        const seriesValues = Array.from(seriesValuesSet).sort();
 
-        // Build lookup: { xValue: { seriesValue: metricValue } }
+        // Build lookup: { xValue: { seriesKey: metricValue } }
         const dataMap = {};
         rows.forEach(r => {
             const x = r[xDim.idx]; // Use raw value as key
-            const s = String(r[seriesDim.idx]);
+            const s = getSeriesKey(r);
             const v = r[metric.idx];
             if (!dataMap[x]) dataMap[x] = {};
             dataMap[x][s] = v;
@@ -253,11 +286,40 @@ const ChartManager = {
                 top: 5,
                 textStyle: { color: '#aaa' }
             },
+            toolbox: {
+                show: true,
+                right: 20,
+                feature: {
+                    dataZoom: {
+                        yAxisIndex: 'none',
+                        title: { zoom: 'Zoom', back: 'Reset' }
+                    }
+                },
+                iconStyle: { borderColor: '#aaa' }
+            },
+            dataZoom: [
+                {
+                    type: 'inside',
+                    xAxisIndex: 0,
+                    filterMode: 'none'
+                },
+                {
+                    type: 'slider',
+                    xAxisIndex: 0,
+                    height: 20,
+                    bottom: 5,
+                    borderColor: '#444',
+                    fillerColor: 'rgba(233,69,96,0.2)',
+                    handleStyle: { color: '#e94560' },
+                    textStyle: { color: '#aaa' },
+                    filterMode: 'none'
+                }
+            ],
             grid: {
                 left: 50,
                 right: 20,
                 top: 40,
-                bottom: 40
+                bottom: 60
             },
             xAxis: {
                 type: 'category',
@@ -298,9 +360,43 @@ const ChartManager = {
         }, true);
     },
 
+    // Check if chart is currently zoomed (not showing full range)
+    hasZoomSelection() {
+        return this.isZoomed === true;
+    },
+
+    // Get the current zoom selection as row indices
+    getZoomSelection() {
+        if (!this.isZoomed) return null;
+        return { startIdx: this.zoomStart, endIdx: this.zoomEnd };
+    },
+
+    // Apply the zoom selection - calls the onBrushSelection callback
+    applyZoomSelection() {
+        if (this.isZoomed && this.onBrushSelection) {
+            this.onBrushSelection(this.zoomStart, this.zoomEnd);
+        }
+    },
+
     clearBrush() {
+        // Cancel any pending zoom application
+        if (this.zoomDebounceTimer) {
+            clearTimeout(this.zoomDebounceTimer);
+            this.zoomDebounceTimer = null;
+        }
+
+        this.isZoomed = false;
+        this.zoomStart = 0;
+        this.zoomEnd = 0;
+
         if (this.chart) {
             this.chart.dispatchAction({ type: 'brush', areas: [] });
+            // Reset dataZoom to full range
+            this.chart.dispatchAction({
+                type: 'dataZoom',
+                start: 0,
+                end: 100
+            });
         }
     },
 

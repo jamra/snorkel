@@ -126,6 +126,16 @@ impl Shard {
             .map(|col| col.get(row_idx))
     }
 
+    /// Access columns with a single lock acquisition for batch operations.
+    /// This is more efficient than calling get_value multiple times.
+    pub fn with_columns<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&HashMap<String, Column>) -> R,
+    {
+        let columns = self.columns.read();
+        f(&columns)
+    }
+
     /// Get timestamp for a row
     pub fn get_timestamp(&self, row_idx: usize) -> Option<i64> {
         self.columns
