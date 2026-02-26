@@ -15,12 +15,12 @@ fn return_row_buf(buf: Vec<Value>) {
 
 // End buffer pool setup
 
-use super::aggregates;::{create_accumulator, Accumulator};
+use super::aggregates::{create_accumulator, Accumulator};
 use super::parser::FilterOperator;
 use super::planner::{
     FilterPlan, GroupByColumnPlan, GroupByPlan, OrderByPlan, ProjectionPlan, QueryPlan,
 };
-use crate::data::{Shard, Table};;
+use crate::data::{Shard, Table, Value};
 use crate::storage::StorageEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
