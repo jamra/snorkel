@@ -1,6 +1,4 @@
-use super::aggregates
 use std::cell::RefCell;
-use crate::data::Value;
 
 // Thread-local pool of reusable row buffers to minimize allocations
 thread_local! {
@@ -175,46 +173,6 @@ fn execute_scan(
 
     Ok((columns, rows, rows_scanned))
 }
-fn execute_scan(
-    shards: &[Arc<Shard>],
-    plan: &QueryPlan,
-    projections: &[ProjectionPlan],
-) -> Result<(Vec<String>, Vec<Vec<Value>>, usize), ExecuteError> {
-    let columns: Vec<String> = projections
-        .iter()
-        .map(|p| match p {
-            ProjectionPlan::Column { output_name, .. } => output_name.clone(),
-            ProjectionPlan::TimeBucket { output_name, .. } => output_name.clone(),
-            ProjectionPlan::Aggregate { output_name, .. } => output_name.clone(),
-        })
-        .collect();
-
-    let mut rows = Vec::new();
-    let mut rows_scanned = 0;
-
-    for shard in shards {
-        for row_idx in shard.row_indices() {
-            rows_scanned += 1;
-
-            // Apply filters
-            if !passes_filters(shard, row_idx, &plan.filters) {
-                continue;
-            }
-
-            // Project columns
-            let row: Vec<Value> = projections
-                .iter()
-                .map(|p| project_value(shard, row_idx, p))
-                .collect();
-
-            rows.push(row);
-        }
-    }
-
-    Ok((columns, rows, rows_scanned))
-}
-
-/// Execute an aggregation query
 fn execute_aggregation(
     shards: &[Arc<Shard>],
     plan: &QueryPlan,

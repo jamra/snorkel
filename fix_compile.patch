@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-mod alloc_counter;
++// mod alloc_counter;  // removed stale allocator stub
+*** End Patch
