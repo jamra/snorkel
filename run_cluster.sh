@@ -3,6 +3,12 @@
 
 echo "Starting Snorkel 3-node cluster..."
 
+# Clean up any existing processes first
+./stop_cluster.sh 2>/dev/null
+
+# Small delay to ensure ports are released
+sleep 1
+
 # Start worker nodes first
 ./run_node2.sh &
 NODE2_PID=$!
@@ -30,6 +36,6 @@ echo ""
 echo "Press Ctrl+C to stop all nodes..."
 
 # Wait for Ctrl+C
-trap "echo 'Stopping cluster...'; kill $NODE1_PID $NODE2_PID $NODE3_PID 2>/dev/null; exit 0" SIGINT SIGTERM
+trap "echo 'Stopping cluster...'; kill $NODE1_PID $NODE2_PID $NODE3_PID 2>/dev/null; ./stop_cluster.sh; exit 0" SIGINT SIGTERM
 
 wait

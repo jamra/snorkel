@@ -411,6 +411,7 @@ const App = {
     },
 
     setChartType(type) {
+        const prevType = this.state.chartType;
         this.state.chartType = type;
         ChartManager.setType(type);
 
@@ -418,13 +419,18 @@ const App = {
             btn.classList.toggle('active', btn.dataset.type === type);
         });
 
-        if (this.state.lastResults) {
+        // Re-run query if switching between bar and line/area (query changes for time series)
+        const wasTimeSeries = prevType === 'line' || prevType === 'area';
+        const isTimeSeries = type === 'line' || type === 'area';
+        if (wasTimeSeries !== isTimeSeries && this.state.groupBy.length > 0) {
+            this.runQuery();
+        } else if (this.state.lastResults) {
             ChartManager.update(this.state.lastResults.rows, this.state.lastResults.columns);
         }
     },
 
     async runQuery() {
-        const sql = QueryBuilder.buildAggregationQuery(this.state);
+        const sql = QueryBuilder.buildAggregationQuery(this.state, this.state.chartType);
         const sampleSql = QueryBuilder.buildSampleQuery(this.state);
 
         if (!sql) {

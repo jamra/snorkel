@@ -3,16 +3,29 @@
 const QueryBuilder = {
     /**
      * Build an aggregation query from the current state
+     * @param {object} state - UI state
+     * @param {string} chartType - 'bar', 'line', 'area', or 'table'
      */
-    buildAggregationQuery(state) {
+    buildAggregationQuery(state, chartType = 'bar') {
         const { table, metrics, groupBy, filters, timeRange } = state;
 
         if (!table) return null;
 
+        // For line/area charts with grouping, include time bucket for time series
+        const isTimeSeries = (chartType === 'line' || chartType === 'area') && groupBy.length > 0;
+
+        // Determine time bucket interval based on time range
+        const bucketInterval = this.getBucketInterval(timeRange);
+
         // Build SELECT clause
         const selectParts = [];
 
-        // Add group by columns first
+        // For time series, add time bucket first
+        if (isTimeSeries) {
+            selectParts.push(`TIME_BUCKET('${bucketInterval}', timestamp)`);
+        }
+
+        // Add group by columns
         groupBy.forEach(col => {
             selectParts.push(col);
         });
@@ -34,11 +47,15 @@ const QueryBuilder = {
         const whereParts = this.buildWhereClause(filters, timeRange);
 
         // Build GROUP BY clause
-        const groupByClause = groupBy.length > 0 ? `GROUP BY ${groupBy.join(', ')}` : '';
+        let groupByColumns = [...groupBy];
+        if (isTimeSeries) {
+            groupByColumns = [`TIME_BUCKET('${bucketInterval}', timestamp)`, ...groupBy];
+        }
+        const groupByClause = groupByColumns.length > 0 ? `GROUP BY ${groupByColumns.join(', ')}` : '';
 
-        // Build ORDER BY - order by first group by column or first metric
+        // Build ORDER BY - skip for time series (chart sorts client-side)
         let orderByClause = '';
-        if (groupBy.length > 0) {
+        if (!isTimeSeries && groupBy.length > 0) {
             orderByClause = `ORDER BY ${groupBy[0]}`;
         }
 
@@ -55,6 +72,45 @@ const QueryBuilder = {
         }
 
         return sql;
+    },
+
+    /**
+     * Determine appropriate bucket interval based on time range
+     */
+    getBucketInterval(timeRange) {
+        if (timeRange.start !== null && timeRange.end !== null) {
+            const durationMs = timeRange.end - timeRange.start;
+            return this.intervalForDuration(durationMs);
+        }
+
+        switch (timeRange.preset) {
+            case '1h':
+                return '1 minute';
+            case '6h':
+                return '5 minutes';
+            case '24h':
+                return '15 minutes';
+            case '7d':
+                return '1 hour';
+            case '30d':
+                return '6 hours';
+            default:
+                return '5 minutes'; // default for 'all'
+        }
+    },
+
+    /**
+     * Calculate bucket interval for a given duration
+     */
+    intervalForDuration(durationMs) {
+        const hour = 3600000;
+        const day = 86400000;
+
+        if (durationMs <= hour) return '1 minute';
+        if (durationMs <= 6 * hour) return '5 minutes';
+        if (durationMs <= day) return '15 minutes';
+        if (durationMs <= 7 * day) return '1 hour';
+        return '6 hours';
     },
 
     /**
