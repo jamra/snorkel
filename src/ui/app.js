@@ -71,6 +71,7 @@ const App = {
             this.state.timeRange = { start: null, end: null, preset: e.target.value };
             this.state.zoomStack = [];
             this.updateZoomInfo();
+            this.runQuery(); // Auto-run when time range changes
         });
         this.elements.btnRun.addEventListener('click', () => this.runQuery());
         this.elements.chartTypeToggle.addEventListener('click', (e) => {
@@ -540,6 +541,12 @@ const App = {
     onBrushSelection(startIndex, endIndex) {
         if (!this.state.lastResults || !this.state.lastResults.rows) return;
 
+        const rows = this.state.lastResults.rows;
+        if (rows.length < 2) {
+            this.updateStatus('Need more data points to zoom');
+            return;
+        }
+
         const tsColIndex = this.state.lastResults.columns.findIndex(c =>
             c === 'timestamp' || c.includes('time') || c.includes('bucket')
         );
@@ -549,32 +556,38 @@ const App = {
             return;
         }
 
-        const rows = this.state.lastResults.rows;
-        const startRow = Math.floor(startIndex);
-        const endRow = Math.ceil(endIndex);
+        const startRow = Math.max(0, Math.floor(startIndex));
+        const endRow = Math.min(rows.length - 1, Math.ceil(endIndex));
 
-        if (startRow >= 0 && endRow < rows.length) {
-            const startTs = rows[startRow][tsColIndex];
-            const endTs = rows[endRow][tsColIndex];
-
-            this.state.zoomStack.push({ ...this.state.timeRange });
-            this.state.timeRange = {
-                start: Math.min(startTs, endTs),
-                end: Math.max(startTs, endTs),
-                preset: null
-            };
-
-            this.updateZoomInfo();
-            this.runQuery();
+        // Don't zoom if selection is too small or covers everything
+        if (endRow <= startRow || (startRow === 0 && endRow === rows.length - 1)) {
+            return;
         }
+
+        const startTs = rows[startRow][tsColIndex];
+        const endTs = rows[endRow][tsColIndex];
+
+        // Don't zoom if timestamps are the same or invalid
+        if (startTs === endTs || startTs === undefined || endTs === undefined) {
+            return;
+        }
+
+        this.state.zoomStack.push({ ...this.state.timeRange });
+        this.state.timeRange = {
+            start: Math.min(startTs, endTs),
+            end: Math.max(startTs, endTs),
+            preset: null
+        };
+
+        this.updateZoomInfo();
+        this.runQuery();
     },
 
     resetZoom() {
-        if (this.state.zoomStack.length > 0) {
-            this.state.timeRange = this.state.zoomStack.pop();
-        } else {
-            this.state.timeRange = { start: null, end: null, preset: 'all' };
-        }
+        // Fully reset to the dropdown preset, clearing all zoom state
+        const preset = this.elements.timeRange.value || 'all';
+        this.state.timeRange = { start: null, end: null, preset: preset };
+        this.state.zoomStack = [];
 
         this.updateZoomInfo();
         ChartManager.clearBrush();
