@@ -2,7 +2,7 @@
 
 A fast, in-memory time-series analytics database written in Rust. Inspired by Facebook's Scuba, Snorkel is designed for real-time analytics on event data with SQL-like queries, automatic data expiration, and horizontal scaling.
 
-![Snorkel UI](docs/snorkel.png)
+<img width="1512" height="830" alt="Screenshot 2026-02-25 at 10 22 17 PM" src="https://github.com/user-attachments/assets/da9e62bb-6387-4ee2-8916-7fceb599a29e" />
 
 ## Features
 
