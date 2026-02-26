@@ -357,7 +357,7 @@ impl HistogramAccumulator {
     pub fn new(bucket_size: f64) -> Self {
         Self {
             bucket_size,
-            buckets: HashMap::new(),
+            buckets: Default::default(),
         }
     }
 }

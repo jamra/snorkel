@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Update File: src/query/executor.rs
+@@
+-use super::aggregates;
+-use std::cell::RefCell;
+-use crate::data::Value;
+-use crate::data::{Shard, Table, Value};
++use std::cell::RefCell;
++use std::sync::Arc;
++use crate::data::{Shard, Table, Value};
+*** End Patch

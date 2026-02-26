@@ -50,4 +50,4 @@ pub use query::{run_query, QueryError, QueryResult};
 pub use storage::{StorageEngine, StorageError};
 
 // Integrate allocation counter globally
-mod alloc_counter;
+// mod alloc_counter;
