@@ -78,16 +78,20 @@ const ChartManager = {
             return;
         }
 
-        // Identify dimensions (strings) and metrics (numbers)
+        // Identify dimensions (strings/timestamps) and metrics (numbers)
         const dimensions = [];
         const metrics = [];
 
         columns.forEach((col, idx) => {
             const val = rows[0][idx];
-            if (typeof val === 'number') {
+            const colLower = col.toLowerCase();
+            // Treat timestamp/time_bucket columns as dimensions, not metrics
+            if (colLower === 'timestamp' || colLower.includes('time_bucket') || colLower.includes('time') || colLower.includes('date')) {
+                dimensions.push({ name: col, idx, isTimestamp: true });
+            } else if (typeof val === 'number') {
                 metrics.push({ name: col, idx });
             } else {
-                dimensions.push({ name: col, idx });
+                dimensions.push({ name: col, idx, isTimestamp: false });
             }
         });
 
@@ -108,9 +112,39 @@ const ChartManager = {
             return;
         }
 
-        // X-axis labels from first dimension, or row indices
+        let option;
+
+        // For line/area charts with 2+ dimensions, pivot: first dim = X-axis, second dim = series
+        if ((this.chartType === 'line' || this.chartType === 'area') && dimensions.length >= 2) {
+            option = this.buildPivotedLineChart(rows, dimensions, metrics);
+        } else {
+            option = this.buildStandardChart(rows, dimensions, metrics);
+        }
+
+        console.log('Setting chart option:', option);
+
+        try {
+            this.chart.setOption(option, true);
+            console.log('Chart updated successfully');
+        } catch (e) {
+            console.error('Failed to set chart option:', e);
+        }
+    },
+
+    // Format timestamp for display
+    formatTimestamp(ts) {
+        const date = new Date(ts);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    },
+
+    // Standard chart: combine all dimensions for X-axis labels
+    buildStandardChart(rows, dimensions, metrics) {
+        // Combine ALL dimension columns for X-axis labels (e.g., "US | click")
         const xLabels = dimensions.length > 0
-            ? rows.map(r => String(r[dimensions[0].idx]))
+            ? rows.map(r => dimensions.map(d => {
+                const val = r[d.idx];
+                return d.isTimestamp ? this.formatTimestamp(val) : String(val);
+            }).join(' | '))
             : rows.map((_, i) => `#${i+1}`);
 
         // Create series for each metric
@@ -124,7 +158,7 @@ const ChartManager = {
             }
         }));
 
-        const option = {
+        return {
             backgroundColor: 'transparent',
             tooltip: {
                 trigger: 'axis',
@@ -162,15 +196,90 @@ const ChartManager = {
             series: series,
             color: ['#e94560', '#4ade80', '#60a5fa', '#fbbf24', '#a78bfa']
         };
+    },
 
-        console.log('Setting chart option:', option);
+    // Pivoted line chart: first dimension = X-axis, second dimension = separate lines
+    buildPivotedLineChart(rows, dimensions, metrics) {
+        const xDim = dimensions[0];
+        const seriesDim = dimensions[1];
+        const metric = metrics[0]; // Use first metric for Y values
 
-        try {
-            this.chart.setOption(option, true);
-            console.log('Chart updated successfully');
-        } catch (e) {
-            console.error('Failed to set chart option:', e);
+        // Get unique X values and series values
+        const xValuesSet = new Set();
+        const seriesValuesSet = new Set();
+        rows.forEach(r => {
+            xValuesSet.add(r[xDim.idx]); // Keep raw value for sorting
+            seriesValuesSet.add(String(r[seriesDim.idx]));
+        });
+
+        // Sort X values (important for timestamps)
+        let xValues = Array.from(xValuesSet);
+        if (xDim.isTimestamp) {
+            xValues.sort((a, b) => a - b);
         }
+        const xLabels = xValues.map(v => xDim.isTimestamp ? this.formatTimestamp(v) : String(v));
+        const seriesValues = Array.from(seriesValuesSet);
+
+        // Build lookup: { xValue: { seriesValue: metricValue } }
+        const dataMap = {};
+        rows.forEach(r => {
+            const x = r[xDim.idx]; // Use raw value as key
+            const s = String(r[seriesDim.idx]);
+            const v = r[metric.idx];
+            if (!dataMap[x]) dataMap[x] = {};
+            dataMap[x][s] = v;
+        });
+
+        // Create a series for each unique value in the second dimension
+        const series = seriesValues.map((sv, i) => ({
+            name: sv,
+            type: 'line',
+            areaStyle: this.chartType === 'area' ? { opacity: 0.4 } : undefined,
+            data: xValues.map(x => dataMap[x]?.[sv] ?? null),
+            smooth: true,
+            connectNulls: true
+        }));
+
+        return {
+            backgroundColor: 'transparent',
+            tooltip: {
+                trigger: 'axis',
+                backgroundColor: 'rgba(30,30,50,0.9)',
+                borderColor: '#444',
+                textStyle: { color: '#fff' }
+            },
+            legend: {
+                show: true,
+                top: 5,
+                textStyle: { color: '#aaa' }
+            },
+            grid: {
+                left: 50,
+                right: 20,
+                top: 40,
+                bottom: 40
+            },
+            xAxis: {
+                type: 'category',
+                data: xLabels,
+                axisLine: { lineStyle: { color: '#444' } },
+                axisLabel: {
+                    color: '#aaa',
+                    rotate: xLabels.length > 6 ? 30 : 0,
+                    fontSize: 11
+                }
+            },
+            yAxis: {
+                type: 'value',
+                name: metric.name,
+                nameTextStyle: { color: '#aaa' },
+                axisLine: { show: false },
+                axisLabel: { color: '#aaa', fontSize: 11 },
+                splitLine: { lineStyle: { color: '#333', type: 'dashed' } }
+            },
+            series: series,
+            color: ['#e94560', '#4ade80', '#60a5fa', '#fbbf24', '#a78bfa', '#f472b6', '#34d399', '#818cf8']
+        };
     },
 
     showTableView() {
