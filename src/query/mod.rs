@@ -3,9 +3,11 @@ pub mod cache;
 pub mod executor;
 pub mod parser;
 pub mod planner;
+pub mod predicate;
 pub mod simd_agg;
 
 pub use cache::{QueryCache, CacheStats};
+pub use predicate::RowMask;
 pub use simd_agg::AggregateStats;
 pub use executor::{execute_query, ExecuteError, QueryResult, AvailabilityMetrics};
 pub use parser::{parse_query, ParseError, ParsedQuery};
