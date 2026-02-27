@@ -35,11 +35,13 @@ const App = {
             btnVisual: document.getElementById('btn-visual'),
             btnQuery: document.getElementById('btn-query'),
             btnForms: document.getElementById('btn-forms'),
+            btnTraces: document.getElementById('btn-traces'),
             sidebarVisual: document.getElementById('sidebar-visual'),
             sidebarQuery: document.getElementById('sidebar-query'),
             sidebarForms: document.getElementById('sidebar-forms'),
             visualContent: document.getElementById('visual-content'),
             queryContent: document.getElementById('query-content'),
+            tracesContent: document.getElementById('traces-content'),
             tableSelect: document.getElementById('table-select'),
             metricsList: document.getElementById('metrics-list'),
             groupByList: document.getElementById('groupby-list'),
@@ -72,6 +74,7 @@ const App = {
         this.elements.btnVisual.addEventListener('click', () => this.setViewMode('visual'));
         this.elements.btnQuery.addEventListener('click', () => this.setViewMode('query'));
         this.elements.btnForms.addEventListener('click', () => this.setViewMode('forms'));
+        this.elements.btnTraces.addEventListener('click', () => this.setViewMode('traces'));
         this.elements.tableSelect.addEventListener('change', (e) => this.onTableChange(e.target.value));
         this.elements.btnAddFilter.addEventListener('click', () => this.addFilter());
         this.elements.timeRange.addEventListener('change', (e) => {
@@ -437,15 +440,29 @@ const App = {
         this.elements.btnVisual.classList.toggle('active', mode === 'visual');
         this.elements.btnQuery.classList.toggle('active', mode === 'query');
         this.elements.btnForms.classList.toggle('active', mode === 'forms');
+        this.elements.btnTraces.classList.toggle('active', mode === 'traces');
         this.elements.sidebarVisual.classList.toggle('active', mode === 'visual');
         this.elements.sidebarQuery.classList.toggle('active', mode === 'query');
         this.elements.sidebarForms.classList.toggle('active', mode === 'forms');
         this.elements.visualContent.classList.toggle('active', mode === 'visual');
         this.elements.queryContent.classList.toggle('active', mode === 'query' || mode === 'forms');
+        this.elements.tracesContent.classList.toggle('active', mode === 'traces');
 
         if (mode === 'visual') {
             ChartManager.resize();
         }
+
+        if (mode === 'traces') {
+            this.initTraceViewer();
+        }
+    },
+
+    initTraceViewer() {
+        if (!this.traceViewer) {
+            this.traceViewer = new TraceViewer(this.elements.tracesContent);
+        }
+        // Load initial trace list
+        this.traceViewer.searchTraces();
     },
 
     setChartType(type) {

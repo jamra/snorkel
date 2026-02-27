@@ -20,6 +20,7 @@ use crate::cluster::{ClusterConfig, Coordinator};
 use crate::compaction::{SubsampleWorker, TtlWorker};
 #[cfg(feature = "kafka")]
 use crate::ingest::{KafkaConfig, KafkaConsumer};
+use crate::otel::handle_otlp_traces;
 use crate::query::QueryCache;
 use crate::storage::StorageEngine;
 
@@ -29,6 +30,7 @@ const APP_JS: &str = include_str!("../ui/app.js");
 const QUERY_BUILDER_JS: &str = include_str!("../ui/query-builder.js");
 const CHART_JS: &str = include_str!("../ui/chart.js");
 const QUERY_FORMS_JS: &str = include_str!("../ui/query-forms.js");
+const TRACES_JS: &str = include_str!("../ui/traces.js");
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -95,6 +97,15 @@ async fn serve_query_forms_js() -> Response {
         .into_response()
 }
 
+async fn serve_traces_js() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/javascript")],
+        TRACES_JS,
+    )
+        .into_response()
+}
+
 /// Build the application router
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -104,6 +115,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ui/query-builder.js", get(serve_query_builder_js))
         .route("/ui/chart.js", get(serve_chart_js))
         .route("/ui/query-forms.js", get(serve_query_forms_js))
+        .route("/ui/traces.js", get(serve_traces_js))
         // Health check
         .route("/health", get(health_check))
         // Data operations
@@ -126,6 +138,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Cache
         .route("/cache/stats", get(cache_stats))
         .route("/cache/invalidate", post(invalidate_cache))
+        // OpenTelemetry
+        .route("/v1/traces", post(handle_otlp_traces))
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(
