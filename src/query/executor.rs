@@ -3,6 +3,7 @@ use super::parser::{AggregateFunction, FilterOperator};
 use super::planner::{
     FilterPlan, GroupByColumnPlan, GroupByPlan, OrderByPlan, ProjectionPlan, QueryPlan,
 };
+use super::predicate::build_combined_mask;
 use super::simd_agg::AggregateStats;
 use crate::data::column::Column;
 use crate::data::{Shard, Table, Value};
@@ -204,12 +205,17 @@ fn execute_simd_aggregation(
             shard.with_columns(|shard_columns| {
                 let row_count = shard.row_count();
 
-                // If there are filters, we need to compute matching row indices
-                let matching_indices: Option<Vec<usize>> = if !plan.filters.is_empty() {
-                    let indices: Vec<usize> = (0..row_count)
-                        .filter(|&row_idx| passes_filters_unlocked(shard_columns, row_idx, &plan.filters))
-                        .collect();
-                    Some(indices)
+                // Use predicate pushdown to build a row mask
+                let mask = build_combined_mask(shard_columns, &plan.filters, row_count);
+
+                // Early exit if no rows match
+                if mask.none() {
+                    return (vec![AggregateStats::default(); projections.len()], 0);
+                }
+
+                // Get matching indices if there are filters
+                let matching_indices: Option<Vec<usize>> = if !mask.all() {
+                    Some(mask.indices())
                 } else {
                     None
                 };
@@ -323,27 +329,46 @@ fn execute_scan(
         })
         .collect();
 
-    // Parallel shard processing with batch column access
+    // Parallel shard processing with predicate pushdown
     let partial_results: Vec<_> = shards
         .par_iter()
         .map(|shard| {
             shard.with_columns(|shard_columns| {
-                let mut local_rows = Vec::new();
-                let mut local_scanned = 0;
+                let row_count = shard.row_count();
 
-                for row_idx in 0..shard.row_count() {
-                    local_scanned += 1;
-                    if !passes_filters_unlocked(shard_columns, row_idx, &plan.filters) {
-                        continue;
-                    }
-                    let row: Vec<Value> = projections
-                        .iter()
-                        .map(|p| project_value_unlocked(shard_columns, row_idx, p))
-                        .collect();
-                    local_rows.push(row);
+                // Use predicate pushdown to build a row mask
+                let mask = build_combined_mask(shard_columns, &plan.filters, row_count);
+
+                // Early exit if no rows match
+                if mask.none() {
+                    return (Vec::new(), row_count);
                 }
 
-                (local_rows, local_scanned)
+                // Only process matching rows
+                let local_rows: Vec<Vec<Value>> = if mask.all() {
+                    // All rows match - no filtering needed
+                    (0..row_count)
+                        .map(|row_idx| {
+                            projections
+                                .iter()
+                                .map(|p| project_value_unlocked(shard_columns, row_idx, p))
+                                .collect()
+                        })
+                        .collect()
+                } else {
+                    // Use the mask to iterate only matching rows
+                    mask.indices()
+                        .into_iter()
+                        .map(|row_idx| {
+                            projections
+                                .iter()
+                                .map(|p| project_value_unlocked(shard_columns, row_idx, p))
+                                .collect()
+                        })
+                        .collect()
+                };
+
+                (local_rows, row_count)
             })
         })
         .collect();
@@ -372,23 +397,31 @@ fn execute_aggregation(
         })
         .collect();
 
-    // Parallel per-shard aggregation with batch column access
+    // Parallel per-shard aggregation with predicate pushdown
     let partial_results: Vec<_> = shards
         .par_iter()
         .map(|shard| {
             shard.with_columns(|shard_columns| {
+                let row_count = shard.row_count();
                 let mut local_groups: FxHashMap<Vec<Value>, (Vec<Value>, Vec<Box<dyn Accumulator>>)> =
                     FxHashMap::default();
-                let mut local_scanned = 0;
 
-                for row_idx in 0..shard.row_count() {
-                    local_scanned += 1;
+                // Use predicate pushdown to build a row mask
+                let mask = build_combined_mask(shard_columns, &plan.filters, row_count);
 
-                    // Apply filters
-                    if !passes_filters_unlocked(shard_columns, row_idx, &plan.filters) {
-                        continue;
-                    }
+                // Early exit if no rows match
+                if mask.none() {
+                    return (local_groups, row_count);
+                }
 
+                // Get matching row indices
+                let matching_rows: Vec<usize> = if mask.all() {
+                    (0..row_count).collect()
+                } else {
+                    mask.indices()
+                };
+
+                for row_idx in matching_rows {
                     // Compute group key
                     let group_key = if let Some(ref group_by) = plan.group_by {
                         compute_group_key_unlocked(shard_columns, row_idx, group_by)
@@ -427,7 +460,7 @@ fn execute_aggregation(
                     }
                 }
 
-                (local_groups, local_scanned)
+                (local_groups, row_count)
             })
         })
         .collect();
@@ -497,14 +530,6 @@ fn execute_aggregation(
     Ok((columns, rows, rows_scanned))
 }
 
-fn like_match(s: &str, pattern: &str) -> bool {
-    // Simple LIKE implementation with % wildcard
-    let pattern = pattern.replace('%', ".*").replace('_', ".");
-    regex::Regex::new(&format!("^{}$", pattern))
-        .map(|re| re.is_match(s))
-        .unwrap_or(false)
-}
-
 // Batch column access versions (avoids per-value lock acquisition)
 
 fn get_value_unlocked(columns: &HashMap<String, Column>, row_idx: usize, column: &str) -> Value {
@@ -512,37 +537,6 @@ fn get_value_unlocked(columns: &HashMap<String, Column>, row_idx: usize, column:
         .get(column)
         .map(|col| col.get(row_idx))
         .unwrap_or(Value::Null)
-}
-
-fn passes_filters_unlocked(
-    columns: &HashMap<String, Column>,
-    row_idx: usize,
-    filters: &[FilterPlan],
-) -> bool {
-    for filter in filters {
-        let value = get_value_unlocked(columns, row_idx, &filter.column);
-
-        let passes = match filter.operator {
-            FilterOperator::Eq => value == filter.value,
-            FilterOperator::NotEq => value != filter.value,
-            FilterOperator::Lt => value < filter.value,
-            FilterOperator::LtEq => value <= filter.value,
-            FilterOperator::Gt => value > filter.value,
-            FilterOperator::GtEq => value >= filter.value,
-            FilterOperator::Like => {
-                if let (Value::String(s), Value::String(pattern)) = (&value, &filter.value) {
-                    like_match(s, pattern)
-                } else {
-                    false
-                }
-            }
-        };
-
-        if !passes {
-            return false;
-        }
-    }
-    true
 }
 
 fn project_value_unlocked(
