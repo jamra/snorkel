@@ -13,6 +13,9 @@ A fast, in-memory time-series analytics database written in Rust. Inspired by Fa
 - **Rich Aggregations** - COUNT, SUM, AVG, MIN, MAX, PERCENTILE
 - **JSON Auto-Flattening** - Nested JSON objects automatically flattened to dot-notation columns
 - **Distributed Queries** - Fan-out queries across multiple nodes with result merging
+- **Query Caching** - TTL-based result cache with automatic invalidation
+- **Bloom Filters** - Fast shard pruning for equality filters
+- **SIMD Aggregations** - Vectorized single-pass statistics computation
 - **Web UI** - Visual query builder with interactive charts
 - **No Dependencies** - Pure Rust with no external database requirements
 
@@ -197,14 +200,48 @@ LIMIT n
 
 ## Performance
 
-Snorkel is optimized for:
+Snorkel is optimized for high-throughput ingestion and sub-millisecond queries.
 
-- **Fast ingestion** - Append-only columnar storage
-- **Efficient scans** - Column pruning and time-range filtering
-- **Low latency** - In-memory with no disk I/O
-- **Parallel execution** - Multi-threaded query processing
+### Benchmark Results (11M rows)
 
-Typical query latencies: **1-50ms** for aggregations over millions of rows.
+| Metric | Result |
+|--------|--------|
+| **Ingest throughput** | 300-390K rows/sec |
+| **Query latency (avg)** | 85-100µs |
+| **Cache speedup** | 287x |
+| **Bloom filter speedup** | 9.5x |
+| **Memory efficiency** | 75 bytes/row |
+
+### Query Latencies
+
+| Query Type | Average | Min |
+|------------|---------|-----|
+| COUNT(*) | 95µs | 53µs |
+| GROUP BY | 85µs | 53µs |
+| AVG aggregation | 89µs | 57µs |
+| Multiple aggregates | 85µs | 59µs |
+| Top N with ORDER BY | 79µs | 56µs |
+
+### Optimizations
+
+- **Bloom filters** - Prune shards that don't contain searched values (9.5x speedup for selective queries)
+- **Predicate pushdown** - Build row masks once per shard instead of per-row filter evaluation
+- **SIMD-friendly aggregations** - Single-pass statistics computation with auto-vectorization
+- **Query result caching** - TTL-based cache with 287x speedup for repeated queries
+- **Parallel shard processing** - Rayon-based parallel execution across CPU cores
+
+### Running Benchmarks
+
+```bash
+# Start server
+cargo run --release &
+
+# Run benchmark (choose scale)
+cargo run --release --bin benchmark small   # 10K rows/table
+cargo run --release --bin benchmark medium  # 100K rows/table
+cargo run --release --bin benchmark large   # 1M rows/table
+cargo run --release --bin benchmark xlarge  # 10M rows/table
+```
 
 ## Development
 
