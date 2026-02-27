@@ -30,6 +30,11 @@ memmap2 = "0.9"
 num_cpus = "1.16"
 getrandom = "=0.2.15"
 rand = "0.8"
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
+
+[features]
+default = []
+kafka = ["rdkafka"]
 
 [dev-dependencies]
 tokio-test = "0.4"
