@@ -474,6 +474,27 @@
             display: block;
         }
 
+        /* Traces mode */
+        .traces-mode {
+            display: none;
+            height: 100%;
+            overflow-y: auto;
+            grid-column: 1 / -1;
+        }
+
+        .traces-mode.active {
+            display: block;
+        }
+
+        /* Hide sidebar when traces mode is active */
+        .app:has(.traces-mode.active) aside.sidebar {
+            display: none;
+        }
+
+        .app:has(.traces-mode.active) main {
+            grid-column: 1 / -1;
+        }
+
         .query-editor {
             flex: 1;
             padding: 16px;
@@ -747,6 +768,7 @@
                 <button id="btn-visual" class="active">Visual Builder</button>
                 <button id="btn-query">SQL Query</button>
                 <button id="btn-forms">Templates</button>
+                <button id="btn-traces">Traces</button>
             </div>
         </header>
 
@@ -874,6 +896,10 @@
                     </table>
                 </div>
             </div>
+
+            <div class="traces-mode" id="traces-content">
+                <!-- Trace viewer populated by traces.js -->
+            </div>
         </main>
     </div>
 
@@ -885,6 +911,7 @@
     <script src="/ui/query-builder.js?v=5"></script>
     <script src="/ui/chart.js?v=5"></script>
     <script src="/ui/query-forms.js?v=1"></script>
+    <script src="/ui/traces.js?v=1"></script>
     <script src="/ui/app.js?v=5"></script>
 </body>
 </html>
