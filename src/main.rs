@@ -8,11 +8,12 @@
 //! - SNORKEL_MAX_MEMORY_MB: Maximum memory in MB (default: 1024)
 //! - RUST_LOG: Log level (default: info)
 //!
-//! Cluster configuration:
+//! Cluster configuration (symmetric mode - any node can coordinate):
 //! - SNORKEL_NODE_ID: Unique identifier for this node (default: node-1)
 //! - SNORKEL_ADVERTISE_ADDR: Address this node advertises to peers (default: 127.0.0.1:PORT)
-//! - SNORKEL_PEERS: Comma-separated list of peer addresses (e.g., "node2:9001,node3:9002")
-//! - SNORKEL_IS_COORDINATOR: Set to "true" if this node is the coordinator (default: true)
+//! - SNORKEL_PEERS: Comma-separated list of peer addresses (e.g., "10.0.0.2:8080,10.0.0.3:8080")
+//!
+//! In cluster mode, put a load balancer in front to distribute queries across all nodes.
 
 use snorkel::api::{run_server, ServerConfig};
 use snorkel::cluster::{ClusterConfig, PeerNode};
@@ -41,15 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|mb| mb * 1024 * 1024)
         .unwrap_or(1024 * 1024 * 1024);
 
-    // Parse cluster configuration
+    // Parse cluster configuration (symmetric mode - any node can coordinate)
     let node_id = std::env::var("SNORKEL_NODE_ID").unwrap_or_else(|_| "node-1".to_string());
     let advertise_addr = std::env::var("SNORKEL_ADVERTISE_ADDR")
         .unwrap_or_else(|_| format!("127.0.0.1:{}", port));
-    let is_coordinator = std::env::var("SNORKEL_IS_COORDINATOR")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(true);
 
-    // Parse peer list: "node2:9001,node3:9002" format
+    // Parse peer list: "10.0.0.2:8080,10.0.0.3:8080" format
     let peers: Vec<PeerNode> = std::env::var("SNORKEL_PEERS")
         .ok()
         .map(|peers_str| {
@@ -69,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         advertise_addr,
         peers,
-        is_coordinator,
+        is_coordinator: true, // Ignored - all nodes can coordinate in symmetric mode
     };
 
     let config = ServerConfig {
@@ -98,14 +96,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cluster info
     if config.cluster_config.is_distributed() {
-        tracing::info!("  Cluster mode: ENABLED");
+        tracing::info!("  Cluster mode: SYMMETRIC (any node can coordinate)");
         tracing::info!("  Node ID: {}", config.cluster_config.node_id);
         tracing::info!("  Advertise address: {}", config.cluster_config.advertise_addr);
-        tracing::info!("  Is coordinator: {}", config.cluster_config.is_coordinator);
         tracing::info!("  Peers: {}", config.cluster_config.peers.len());
         for peer in &config.cluster_config.peers {
             tracing::info!("    - {} @ {}", peer.id, peer.addr);
         }
+        tracing::info!("  Note: Put a load balancer in front to distribute queries");
     } else {
         tracing::info!("  Cluster mode: DISABLED (single node)");
     }
