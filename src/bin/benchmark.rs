@@ -209,5 +209,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Query benchmarks
+    println!();
+    println!("Query Benchmarks");
+    println!("================");
+
+    let queries = vec![
+        ("COUNT(*)", "SELECT COUNT(*) FROM web_events"),
+        ("COUNT with filter", "SELECT COUNT(*) FROM web_events WHERE event = 'click'"),
+        ("GROUP BY", "SELECT event, COUNT(*) FROM web_events GROUP BY event"),
+        ("GROUP BY + ORDER", "SELECT event, COUNT(*) as cnt FROM web_events GROUP BY event ORDER BY cnt DESC"),
+        ("AVG aggregation", "SELECT AVG(latency_ms) FROM web_events"),
+        ("Multiple aggs", "SELECT COUNT(*), AVG(latency_ms), MIN(latency_ms), MAX(latency_ms) FROM web_events"),
+        ("GROUP BY country", "SELECT country, COUNT(*), AVG(latency_ms) FROM web_events GROUP BY country"),
+        ("Top pages", "SELECT page, COUNT(*) as hits FROM web_events GROUP BY page ORDER BY hits DESC LIMIT 5"),
+        ("Metrics by host", "SELECT host, AVG(cpu_percent), AVG(memory_mb) FROM metrics GROUP BY host"),
+        ("Error counts", "SELECT level, COUNT(*) FROM error_logs GROUP BY level"),
+    ];
+
+    let num_iterations = 10;
+
+    for (name, sql) in &queries {
+        let mut latencies = Vec::with_capacity(num_iterations);
+
+        // Warm up (1 query, not timed)
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": sql }))
+            .send()
+            .await?;
+
+        // Timed iterations
+        for _ in 0..num_iterations {
+            let start = Instant::now();
+            let response = client
+                .post(format!("{}/query", base_url))
+                .json(&json!({ "sql": sql }))
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                eprintln!("Query failed: {} - {}", name, response.text().await?);
+                break;
+            }
+            latencies.push(start.elapsed());
+        }
+
+        if latencies.is_empty() {
+            continue;
+        }
+
+        let avg: Duration = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+        let min = *latencies.iter().min().unwrap();
+        let max = *latencies.iter().max().unwrap();
+        latencies.sort();
+        let p50 = latencies[latencies.len() / 2];
+        let p99 = latencies[latencies.len() * 99 / 100];
+
+        println!("{:20} avg={:>8.2?} min={:>8.2?} max={:>8.2?} p50={:>8.2?} p99={:>8.2?}",
+            name, avg, min, max, p50, p99);
+    }
+
+    // Cache benchmark
+    println!();
+    println!("Cache Performance");
+    println!("=================");
+
+    // Clear cache first
+    let _ = client
+        .post(format!("{}/cache/invalidate", base_url))
+        .send()
+        .await?;
+
+    let cache_query = "SELECT event, COUNT(*) FROM web_events GROUP BY event";
+
+    // Cold query (cache miss)
+    let start = Instant::now();
+    let _ = client
+        .post(format!("{}/query", base_url))
+        .json(&json!({ "sql": cache_query }))
+        .send()
+        .await?;
+    let cold_time = start.elapsed();
+
+    // Warm queries (cache hits)
+    let mut warm_times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": cache_query }))
+            .send()
+            .await?;
+        warm_times.push(start.elapsed());
+    }
+
+    let warm_avg: Duration = warm_times.iter().sum::<Duration>() / warm_times.len() as u32;
+    let speedup = cold_time.as_secs_f64() / warm_avg.as_secs_f64();
+
+    println!("Cold (cache miss):   {:?}", cold_time);
+    println!("Warm (cache hit):    {:?} avg", warm_avg);
+    println!("Cache speedup:       {:.1}x", speedup);
+
+    // Print cache stats
+    let cache_stats: Value = client
+        .get(format!("{}/cache/stats", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    if let Some(cache) = cache_stats.get("cache") {
+        println!("Cache stats:         hits={}, misses={}, size={}",
+            cache["hits"], cache["misses"], cache["size"]);
+    }
+
     Ok(())
 }

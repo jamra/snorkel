@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::alerts::{Alert, AlertChecker, AlertCondition};
 use crate::cluster::{ClusterConfig, Coordinator};
 use crate::data::{value::flatten_json, TableConfig, Value};
-use crate::query::{run_query, QueryResult};
+use crate::query::{run_query, QueryResult, QueryCache, CacheStats};
 use crate::storage::StorageEngine;
 
 /// Application state shared across handlers
@@ -18,6 +19,8 @@ pub struct AppState {
     pub engine: Arc<StorageEngine>,
     pub coordinator: Option<Arc<Coordinator>>,
     pub cluster_config: ClusterConfig,
+    pub query_cache: Arc<QueryCache>,
+    pub alert_checker: Arc<AlertChecker>,
 }
 
 // ============================================================================
@@ -45,6 +48,10 @@ pub async fn health_check() -> Json<HealthResponse> {
 pub struct IngestRequest {
     pub table: String,
     pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// Sample rate (0.0 to 1.0). If set, only this fraction of rows will be ingested.
+    /// For example, 0.1 means only 10% of rows are kept.
+    #[serde(default)]
+    pub sample_rate: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -57,12 +64,34 @@ pub async fn ingest(
     State(state): State<Arc<AppState>>,
     Json(request): Json<IngestRequest>,
 ) -> Result<Json<IngestResponse>, ApiError> {
+    use rand::Rng;
+
     // Flatten nested JSON objects/arrays into dot-notation columns
     let rows: Vec<HashMap<String, Value>> = request
         .rows
         .iter()
         .map(|row| flatten_json(row))
         .collect();
+
+    // Apply sample rate filtering if specified
+    let rows = if let Some(sample_rate) = request.sample_rate {
+        if sample_rate <= 0.0 {
+            return Ok(Json(IngestResponse {
+                inserted: 0,
+                errors: 0,
+            }));
+        }
+        if sample_rate >= 1.0 {
+            rows
+        } else {
+            let mut rng = rand::thread_rng();
+            rows.into_iter()
+                .filter(|_| rng.gen::<f64>() < sample_rate)
+                .collect()
+        }
+    } else {
+        rows
+    };
 
     let total = rows.len();
     let inserted = state
@@ -93,6 +122,17 @@ pub struct QueryResponse {
     pub rows_scanned: usize,
     pub shards_scanned: usize,
     pub execution_time_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<AvailabilityInfo>,
+}
+
+/// Availability info for query response
+#[derive(Serialize)]
+pub struct AvailabilityInfo {
+    pub availability_percent: f64,
+    pub nodes_queried: usize,
+    pub nodes_responded: usize,
+    pub complete: bool,
 }
 
 impl From<QueryResult> for QueryResponse {
@@ -103,6 +143,13 @@ impl From<QueryResult> for QueryResponse {
             .map(|row| row.into_iter().map(value_to_json).collect())
             .collect();
 
+        let availability = result.availability.map(|a| AvailabilityInfo {
+            availability_percent: a.availability_percent,
+            nodes_queried: a.nodes_queried,
+            nodes_responded: a.nodes_responded,
+            complete: a.complete,
+        });
+
         Self {
             columns: result.columns,
             row_count: rows.len(),
@@ -110,6 +157,7 @@ impl From<QueryResult> for QueryResponse {
             rows_scanned: result.rows_scanned,
             shards_scanned: result.shards_scanned,
             execution_time_ms: result.execution_time_ms,
+            availability,
         }
     }
 }
@@ -129,6 +177,11 @@ pub async fn query(
     State(state): State<Arc<AppState>>,
     Json(request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    // Check cache first
+    if let Some(cached) = state.query_cache.get(&request.sql) {
+        return Ok(Json(cached.into()));
+    }
+
     let result = if let Some(ref coordinator) = state.coordinator {
         // Distributed query
         coordinator
@@ -139,6 +192,9 @@ pub async fn query(
         // Local query
         run_query(&state.engine, &request.sql).map_err(|e| ApiError::Query(e.to_string()))?
     };
+
+    // Cache the result
+    state.query_cache.put(&request.sql, result.clone());
 
     Ok(Json(result.into()))
 }
@@ -331,4 +387,120 @@ impl IntoResponse for ApiError {
 
         (status, Json(body)).into_response()
     }
+}
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct AlertsResponse {
+    pub alerts: Vec<Alert>,
+}
+
+pub async fn list_alerts(State(state): State<Arc<AppState>>) -> Json<AlertsResponse> {
+    let alerts = state.alert_checker.list();
+    Json(AlertsResponse { alerts })
+}
+
+pub async fn get_alert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Alert>, ApiError> {
+    state
+        .alert_checker
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("Alert '{}' not found", id)))
+}
+
+pub async fn create_alert(
+    State(state): State<Arc<AppState>>,
+    Json(alert): Json<Alert>,
+) -> Result<Json<Alert>, ApiError> {
+    // Validate the alert
+    if alert.id.is_empty() {
+        return Err(ApiError::BadRequest("Alert ID cannot be empty".to_string()));
+    }
+    if alert.query.is_empty() {
+        return Err(ApiError::BadRequest("Alert query cannot be empty".to_string()));
+    }
+
+    // Check if already exists
+    if state.alert_checker.get(&alert.id).is_some() {
+        return Err(ApiError::BadRequest(format!("Alert '{}' already exists", alert.id)));
+    }
+
+    state.alert_checker.register(alert.clone());
+    Ok(Json(alert))
+}
+
+pub async fn update_alert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(mut alert): Json<Alert>,
+) -> Result<Json<Alert>, ApiError> {
+    // Ensure ID matches path
+    alert.id = id.clone();
+
+    // Check if exists
+    if state.alert_checker.get(&id).is_none() {
+        return Err(ApiError::NotFound(format!("Alert '{}' not found", id)));
+    }
+
+    state.alert_checker.update(alert.clone());
+    Ok(Json(alert))
+}
+
+pub async fn delete_alert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .alert_checker
+        .unregister(&id)
+        .map(|_| Json(serde_json::json!({ "deleted": id })))
+        .ok_or_else(|| ApiError::NotFound(format!("Alert '{}' not found", id)))
+}
+
+#[derive(Deserialize)]
+pub struct AlertEnableRequest {
+    pub enabled: bool,
+}
+
+pub async fn set_alert_enabled(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<AlertEnableRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.alert_checker.set_enabled(&id, request.enabled) {
+        Ok(Json(serde_json::json!({
+            "id": id,
+            "enabled": request.enabled
+        })))
+    } else {
+        Err(ApiError::NotFound(format!("Alert '{}' not found", id)))
+    }
+}
+
+// ============================================================================
+// Cache Stats
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct CacheStatsResponse {
+    pub cache: CacheStats,
+}
+
+pub async fn cache_stats(State(state): State<Arc<AppState>>) -> Json<CacheStatsResponse> {
+    Json(CacheStatsResponse {
+        cache: state.query_cache.stats(),
+    })
+}
+
+pub async fn invalidate_cache(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    state.query_cache.invalidate_all();
+    Json(serde_json::json!({ "invalidated": true }))
 }

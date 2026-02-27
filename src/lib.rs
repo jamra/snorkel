@@ -37,6 +37,7 @@
 //! println!("Results: {:?}", result);
 //! ```
 
+pub mod alerts;
 pub mod api;
 pub mod cluster;
 pub mod compaction;
