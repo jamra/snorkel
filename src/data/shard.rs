@@ -1,5 +1,6 @@
 use super::column::Column;
 use super::value::{DataType, Value};
+use crate::storage::BloomFilter;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,6 +31,8 @@ pub struct Shard {
     schema: RwLock<HashMap<String, DataType>>,
     /// Whether this shard is sealed (no more writes)
     sealed: RwLock<bool>,
+    /// Bloom filters for string/int columns (for fast filtering)
+    bloom_filters: RwLock<HashMap<String, BloomFilter>>,
 }
 
 impl Shard {
@@ -42,6 +45,7 @@ impl Shard {
             row_count: AtomicUsize::new(0),
             schema: RwLock::new(HashMap::new()),
             sealed: RwLock::new(false),
+            bloom_filters: RwLock::new(HashMap::new()),
         }
     }
 
@@ -82,6 +86,8 @@ impl Shard {
         }
 
         // Then add values for all columns in the row
+        let mut bloom_filters = self.bloom_filters.write();
+
         for (name, value) in row {
             // Update schema
             let value_type = DataType::from_value(value);
@@ -101,6 +107,23 @@ impl Shard {
                 }
                 col.push(value);
                 columns.insert(name.clone(), col);
+            }
+
+            // Update bloom filter for string and int values
+            match value {
+                Value::String(s) => {
+                    let bf = bloom_filters
+                        .entry(name.clone())
+                        .or_insert_with(|| BloomFilter::new(10000, 0.01));
+                    bf.insert_str(s);
+                }
+                Value::Int64(i) => {
+                    let bf = bloom_filters
+                        .entry(name.clone())
+                        .or_insert_with(|| BloomFilter::new(10000, 0.01));
+                    bf.insert_i64(*i);
+                }
+                _ => {}
             }
         }
 
@@ -263,6 +286,48 @@ impl Shard {
             .enumerate()
             .filter(|(_, v)| predicate(v))
             .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Check if this shard might contain a specific value using bloom filters.
+    /// Returns true if the value might be present, false if definitely not present.
+    /// Use this to skip shards that definitely don't match a filter predicate.
+    pub fn might_contain_value(&self, column: &str, value: &Value) -> bool {
+        let bloom_filters = self.bloom_filters.read();
+
+        match bloom_filters.get(column) {
+            Some(bf) => match value {
+                Value::String(s) => bf.might_contain_str(s),
+                Value::Int64(i) => bf.might_contain_i64(*i),
+                _ => true, // No bloom filter for this type, assume might contain
+            },
+            None => true, // No bloom filter for this column, assume might contain
+        }
+    }
+
+    /// Check if this shard might contain any of the specified values.
+    /// Returns true if any value might be present.
+    pub fn might_contain_any(&self, column: &str, values: &[Value]) -> bool {
+        let bloom_filters = self.bloom_filters.read();
+
+        match bloom_filters.get(column) {
+            Some(bf) => values.iter().any(|v| match v {
+                Value::String(s) => bf.might_contain_str(s),
+                Value::Int64(i) => bf.might_contain_i64(*i),
+                _ => true,
+            }),
+            None => true,
+        }
+    }
+
+    /// Get bloom filter statistics for this shard
+    pub fn bloom_filter_stats(&self) -> HashMap<String, (usize, f64)> {
+        let bloom_filters = self.bloom_filters.read();
+        bloom_filters
+            .iter()
+            .map(|(name, bf)| {
+                (name.clone(), (bf.count(), bf.estimated_false_positive_rate()))
+            })
             .collect()
     }
 }
