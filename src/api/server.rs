@@ -18,6 +18,8 @@ use super::handlers::{
 use crate::alerts::AlertChecker;
 use crate::cluster::{ClusterConfig, Coordinator};
 use crate::compaction::{SubsampleWorker, TtlWorker};
+#[cfg(feature = "kafka")]
+use crate::ingest::{KafkaConfig, KafkaConsumer};
 use crate::query::QueryCache;
 use crate::storage::StorageEngine;
 
@@ -170,6 +172,36 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
         query_cache,
         alert_checker,
     });
+
+    // Start Kafka consumer if configured
+    #[cfg(feature = "kafka")]
+    let _kafka_handle = {
+        if let Some(kafka_config) = KafkaConfig::from_env() {
+            tracing::info!(
+                "Kafka ingest enabled: brokers={}, topics={:?}, group={}",
+                kafka_config.brokers,
+                kafka_config.topics,
+                kafka_config.group_id
+            );
+            match KafkaConsumer::new(kafka_config, Arc::clone(&engine)) {
+                Ok(consumer) => {
+                    if let Err(e) = consumer.subscribe() {
+                        tracing::error!("Failed to subscribe to Kafka topics: {}", e);
+                        None
+                    } else {
+                        Some(consumer.start())
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create Kafka consumer: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::debug!("Kafka ingest not configured (set KAFKA_TOPICS to enable)");
+            None
+        }
+    };
 
     // Start background workers
     let ttl_worker = Arc::new(TtlWorker::new(

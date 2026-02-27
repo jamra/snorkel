@@ -42,6 +42,7 @@ pub mod api;
 pub mod cluster;
 pub mod compaction;
 pub mod data;
+pub mod ingest;
 pub mod query;
 pub mod storage;
 

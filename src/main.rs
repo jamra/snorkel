@@ -13,6 +13,12 @@
 //! - SNORKEL_ADVERTISE_ADDR: Address this node advertises to peers (default: 127.0.0.1:PORT)
 //! - SNORKEL_PEERS: Comma-separated list of peer addresses (e.g., "10.0.0.2:8080,10.0.0.3:8080")
 //!
+//! Kafka ingest (optional, requires `kafka` feature):
+//! - KAFKA_BROKERS: Comma-separated list of brokers (default: localhost:9092)
+//! - KAFKA_TOPICS: Comma-separated list of topics to consume (enables Kafka ingest)
+//! - KAFKA_GROUP_ID: Consumer group ID (default: snorkel)
+//! - KAFKA_AUTO_OFFSET_RESET: Where to start if no offset (earliest/latest, default: earliest)
+//!
 //! In cluster mode, put a load balancer in front to distribute queries across all nodes.
 
 use snorkel::api::{run_server, ServerConfig};
