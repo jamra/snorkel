@@ -1,102 +1,116 @@
+//! Hierarchical aggregator for distributed query execution
+//!
+//! Implements multi-tier aggregation to reduce coordinator load.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::client::ClusterClient;
+use super::topology::{ClusterTopology, NodeTier};
 use crate::data::Value;
 use crate::query::{QueryResult, AvailabilityMetrics, run_query};
 use crate::storage::StorageEngine;
 
-use super::client::{ClusterClient, ClusterError};
-use super::config::ClusterConfig;
-
-/// Distributed query coordinator
-pub struct Coordinator {
-    config: ClusterConfig,
+/// Hierarchical aggregator that routes queries based on topology
+pub struct HierarchicalAggregator {
+    topology: ClusterTopology,
     client: ClusterClient,
     local_engine: Arc<StorageEngine>,
 }
 
-impl Coordinator {
-    pub fn new(config: ClusterConfig, local_engine: Arc<StorageEngine>) -> Self {
+impl HierarchicalAggregator {
+    pub fn new(
+        topology: ClusterTopology,
+        local_engine: Arc<StorageEngine>,
+    ) -> Self {
         Self {
-            config,
+            topology,
             client: ClusterClient::new(),
             local_engine,
         }
     }
 
-    /// Execute a query across the cluster
-    pub async fn execute_query(&self, sql: &str) -> Result<QueryResult, CoordinatorError> {
+    /// Execute a query using hierarchical aggregation
+    pub async fn execute(&self, sql: &str) -> Result<QueryResult, AggregatorError> {
         let start = std::time::Instant::now();
 
-        if !self.config.is_distributed() {
-            // Single node mode - just execute locally
-            return run_query(&self.local_engine, sql)
-                .map_err(|e| CoordinatorError::Query(e.to_string()));
+        match self.topology.tier() {
+            NodeTier::Leaf => {
+                // Leaf nodes just execute locally
+                self.execute_local(sql).await
+            }
+            NodeTier::Aggregator | NodeTier::Coordinator => {
+                // Aggregators and coordinators fan out to children
+                self.execute_distributed(sql).await
+            }
         }
+        .map(|mut result| {
+            result.execution_time_ms = start.elapsed().as_millis() as u64;
+            result
+        })
+    }
 
-        // Distributed mode - fan out to all nodes (including self)
-        let peer_addrs = self.config.peer_addrs();
-        let total_nodes = peer_addrs.len() + 1; // peers + self
+    /// Execute query locally (for leaf nodes)
+    async fn execute_local(&self, sql: &str) -> Result<QueryResult, AggregatorError> {
+        run_query(&self.local_engine, sql)
+            .map_err(|e| AggregatorError::Query(e.to_string()))
+    }
 
-        // Execute on peers in parallel
-        let peer_futures = self.client.query_all(&peer_addrs, sql);
+    /// Execute query across children and aggregate results
+    async fn execute_distributed(&self, sql: &str) -> Result<QueryResult, AggregatorError> {
+        let child_addrs = self.topology.child_addrs();
+        let total_nodes = child_addrs.len() + 1; // children + self
+
+        // Execute on children in parallel
+        let child_futures = self.client.query_all(&child_addrs, sql);
 
         // Execute locally
         let local_result = run_query(&self.local_engine, sql)
-            .map_err(|e| CoordinatorError::Query(e.to_string()))?;
+            .map_err(|e| AggregatorError::Query(e.to_string()))?;
 
-        // Wait for peer results
-        let peer_results = peer_futures.await;
+        // Wait for child results
+        let child_results = child_futures.await;
 
-        // Collect all successful results and track availability
+        // Collect successful results
         let mut all_results = vec![local_result];
-        let mut nodes_responded = 1; // Count local node
+        let mut nodes_responded = 1;
 
-        for result in peer_results {
+        for result in child_results {
             match result {
                 Ok(r) => {
                     all_results.push(r);
                     nodes_responded += 1;
                 }
                 Err(e) => {
-                    tracing::warn!("Peer query failed: {}", e);
-                    // Continue with other results - partial failure is OK
+                    tracing::warn!("Child query failed: {}", e);
                 }
             }
         }
 
         if all_results.is_empty() {
-            return Err(CoordinatorError::NoResults);
+            return Err(AggregatorError::NoResults);
         }
 
-        // Calculate availability metrics
+        // Calculate availability
         let availability = AvailabilityMetrics {
             availability_percent: (nodes_responded as f64 / total_nodes as f64) * 100.0,
             nodes_queried: total_nodes,
             nodes_responded,
-            staleness_ms: None, // Could compute from oldest data timestamp
+            staleness_ms: None,
             complete: nodes_responded == total_nodes,
         };
 
         // Merge results
-        let mut merged = self.merge_results(all_results, sql)?;
-
-        let execution_time_ms = start.elapsed().as_millis() as u64;
-
-        merged.execution_time_ms = execution_time_ms;
+        let mut merged = self.merge_results(all_results)?;
         merged.availability = Some(availability);
 
         Ok(merged)
     }
 
     /// Merge results from multiple nodes
-    fn merge_results(
-        &self,
-        results: Vec<QueryResult>,
-        _sql: &str,
-    ) -> Result<QueryResult, CoordinatorError> {
+    fn merge_results(&self, results: Vec<QueryResult>) -> Result<QueryResult, AggregatorError> {
         if results.is_empty() {
-            return Err(CoordinatorError::NoResults);
+            return Err(AggregatorError::NoResults);
         }
 
         if results.len() == 1 {
@@ -106,7 +120,7 @@ impl Coordinator {
         let first = &results[0];
         let columns = first.columns.clone();
 
-        // Check if this is an aggregation query (has aggregation columns)
+        // Check if this is an aggregation query
         let is_aggregation = columns.iter().any(|c| {
             c.starts_with("count_")
                 || c.starts_with("sum_")
@@ -126,18 +140,18 @@ impl Coordinator {
             rows,
             rows_scanned,
             shards_scanned,
-            execution_time_ms: 0, // Will be set by caller
-            availability: None, // Will be set by caller
+            execution_time_ms: 0,
+            availability: None,
         })
     }
 
-    /// Merge aggregation results by re-aggregating
+    /// Merge aggregation results
     fn merge_aggregation_results(
         &self,
         results: &[QueryResult],
         columns: &[String],
     ) -> (Vec<Vec<Value>>, usize, usize) {
-        // Find group key columns (non-aggregate columns)
+        // Find group key columns
         let group_key_indices: Vec<usize> = columns
             .iter()
             .enumerate()
@@ -151,7 +165,7 @@ impl Coordinator {
             .map(|(i, _)| i)
             .collect();
 
-        // Find aggregate column indices and their types
+        // Find aggregate columns
         let agg_columns: Vec<(usize, AggType)> = columns
             .iter()
             .enumerate()
@@ -172,10 +186,8 @@ impl Coordinator {
             })
             .collect();
 
-        // Group by key and merge aggregates
-        // Key: group values, Value: (count, sum, min, max) for each agg column
+        // Group and merge
         let mut groups: HashMap<Vec<Value>, Vec<AggState>> = HashMap::new();
-
         let mut total_rows_scanned = 0;
         let mut total_shards_scanned = 0;
 
@@ -196,7 +208,6 @@ impl Coordinator {
                         .collect()
                 });
 
-                // Update each aggregate state
                 for (state_idx, (col_idx, _)) in agg_columns.iter().enumerate() {
                     if let Some(value) = row.get(*col_idx) {
                         states[state_idx].merge_value(value);
@@ -205,16 +216,15 @@ impl Coordinator {
             }
         }
 
-        // Build final result rows
+        // Build result rows
         let mut rows: Vec<Vec<Value>> = groups
             .into_iter()
             .map(|(group_key, states)| {
                 let mut row = Vec::with_capacity(columns.len());
-
                 let mut group_idx = 0;
                 let mut state_idx = 0;
 
-                for (col_idx, _col_name) in columns.iter().enumerate() {
+                for (col_idx, _) in columns.iter().enumerate() {
                     if group_key_indices.contains(&col_idx) {
                         row.push(group_key[group_idx].clone());
                         group_idx += 1;
@@ -228,7 +238,7 @@ impl Coordinator {
             })
             .collect();
 
-        // Sort by group key for consistent ordering
+        // Sort by group key
         rows.sort_by(|a, b| {
             for i in &group_key_indices {
                 if let (Some(av), Some(bv)) = (a.get(*i), b.get(*i)) {
@@ -244,7 +254,7 @@ impl Coordinator {
         (rows, total_rows_scanned, total_shards_scanned)
     }
 
-    /// Merge non-aggregation (scan) results by concatenating
+    /// Merge scan results by concatenating
     fn merge_scan_results(&self, results: &[QueryResult]) -> (Vec<Vec<Value>>, usize, usize) {
         let mut all_rows = Vec::new();
         let mut total_rows_scanned = 0;
@@ -302,11 +312,7 @@ impl AggState {
                 }
             }
             AggType::Avg => {
-                // For AVG, we receive the partial average
-                // We need to track count separately to properly merge
-                // For now, we'll use a weighted approach
                 if let Some(avg) = value.as_f64() {
-                    // Approximate: treat each partial avg as one sample
                     self.sum += avg;
                     self.count += 1;
                 }
@@ -350,13 +356,13 @@ impl AggState {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CoordinatorError {
+pub enum AggregatorError {
     #[error("Query error: {0}")]
     Query(String),
 
-    #[error("Cluster error: {0}")]
-    Cluster(#[from] ClusterError),
-
     #[error("No results from any node")]
     NoResults,
+
+    #[error("Network error: {0}")]
+    Network(String),
 }

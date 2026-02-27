@@ -4,6 +4,16 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Statistics about compression for a shard
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ShardCompressionStats {
+    pub compressed_columns: usize,
+    pub uncompressed_columns: usize,
+    pub original_size: usize,
+    pub compressed_size: usize,
+    pub compression_ratio: f64,
+}
+
 /// Time-bounded partition of data.
 /// Each shard covers a specific time range (e.g., 1 hour).
 #[derive(Debug)]
@@ -145,8 +155,65 @@ impl Shard {
     }
 
     /// Seal the shard (no more writes allowed)
+    /// This also compresses columns to reduce memory usage.
     pub fn seal(&self) {
-        *self.sealed.write() = true;
+        let mut sealed = self.sealed.write();
+        if *sealed {
+            return; // Already sealed
+        }
+        *sealed = true;
+
+        // Compress columns for memory efficiency
+        self.compress_columns();
+    }
+
+    /// Compress all columns in the shard
+    fn compress_columns(&self) {
+        let mut columns = self.columns.write();
+        let mut compressed_columns = std::collections::HashMap::new();
+
+        for (name, column) in columns.iter() {
+            // Only compress if we have enough data to make it worthwhile
+            if column.len() >= 100 && !column.is_compressed() {
+                compressed_columns.insert(name.clone(), column.compress());
+            }
+        }
+
+        // Replace with compressed versions
+        for (name, compressed) in compressed_columns {
+            columns.insert(name, compressed);
+        }
+    }
+
+    /// Get compression statistics for this shard
+    pub fn compression_stats(&self) -> ShardCompressionStats {
+        let columns = self.columns.read();
+        let mut compressed_count = 0;
+        let mut uncompressed_count = 0;
+        let mut total_original_size = 0;
+        let mut total_compressed_size = 0;
+
+        for column in columns.values() {
+            if let Column::Compressed { data, .. } = column {
+                compressed_count += 1;
+                total_original_size += data.original_size;
+                total_compressed_size += data.data.len();
+            } else {
+                uncompressed_count += 1;
+            }
+        }
+
+        ShardCompressionStats {
+            compressed_columns: compressed_count,
+            uncompressed_columns: uncompressed_count,
+            original_size: total_original_size,
+            compressed_size: total_compressed_size,
+            compression_ratio: if total_compressed_size > 0 {
+                total_original_size as f64 / total_compressed_size as f64
+            } else {
+                1.0
+            },
+        }
     }
 
     /// Check if shard is sealed

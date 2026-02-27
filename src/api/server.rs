@@ -11,11 +11,14 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handlers::{
-    create_table, drop_table, health_check, ingest, list_tables, query, stats, table_schema,
-    AppState,
+    cache_stats, create_alert, create_table, delete_alert, drop_table, get_alert, health_check,
+    ingest, invalidate_cache, list_alerts, list_tables, query, set_alert_enabled, stats,
+    table_schema, update_alert, AppState,
 };
+use crate::alerts::AlertChecker;
 use crate::cluster::{ClusterConfig, Coordinator};
 use crate::compaction::{SubsampleWorker, TtlWorker};
+use crate::query::QueryCache;
 use crate::storage::StorageEngine;
 
 // Embed UI files at compile time
@@ -23,6 +26,7 @@ const INDEX_HTML: &str = include_str!("../ui/index.html");
 const APP_JS: &str = include_str!("../ui/app.js");
 const QUERY_BUILDER_JS: &str = include_str!("../ui/query-builder.js");
 const CHART_JS: &str = include_str!("../ui/chart.js");
+const QUERY_FORMS_JS: &str = include_str!("../ui/query-forms.js");
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -80,6 +84,15 @@ async fn serve_chart_js() -> Response {
         .into_response()
 }
 
+async fn serve_query_forms_js() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/javascript")],
+        QUERY_FORMS_JS,
+    )
+        .into_response()
+}
+
 /// Build the application router
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -88,6 +101,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/ui/app.js", get(serve_app_js))
         .route("/ui/query-builder.js", get(serve_query_builder_js))
         .route("/ui/chart.js", get(serve_chart_js))
+        .route("/ui/query-forms.js", get(serve_query_forms_js))
         // Health check
         .route("/health", get(health_check))
         // Data operations
@@ -100,6 +114,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/tables/:name/schema", get(table_schema))
         // Stats
         .route("/stats", get(stats))
+        // Alerts
+        .route("/alerts", get(list_alerts))
+        .route("/alerts", post(create_alert))
+        .route("/alerts/:id", get(get_alert))
+        .route("/alerts/:id", axum::routing::put(update_alert))
+        .route("/alerts/:id", delete(delete_alert))
+        .route("/alerts/:id/enable", post(set_alert_enabled))
+        // Cache
+        .route("/cache/stats", get(cache_stats))
+        .route("/cache/invalidate", post(invalidate_cache))
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(
@@ -132,11 +156,19 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
         None
     };
 
+    // Initialize query cache
+    let query_cache = Arc::new(QueryCache::new());
+
+    // Initialize alert checker
+    let alert_checker = Arc::new(AlertChecker::new(Arc::clone(&engine)));
+
     // Initialize app state
     let state = Arc::new(AppState {
         engine: Arc::clone(&engine),
         coordinator,
         cluster_config: config.cluster_config.clone(),
+        query_cache,
+        alert_checker,
     });
 
     // Start background workers
@@ -195,9 +227,11 @@ mod tests {
     fn create_test_app() -> Router {
         let engine = Arc::new(StorageEngine::new());
         let state = Arc::new(AppState {
-            engine,
+            engine: Arc::clone(&engine),
             coordinator: None,
             cluster_config: ClusterConfig::default(),
+            query_cache: Arc::new(QueryCache::new()),
+            alert_checker: Arc::new(AlertChecker::new(engine)),
         });
         build_router(state)
     }
@@ -226,6 +260,8 @@ mod tests {
             engine: Arc::clone(&engine),
             coordinator: None,
             cluster_config: ClusterConfig::default(),
+            query_cache: Arc::new(QueryCache::new()),
+            alert_checker: Arc::new(AlertChecker::new(Arc::clone(&engine))),
         });
         let app = build_router(state);
 
@@ -283,9 +319,11 @@ mod tests {
             .unwrap();
 
         let state = Arc::new(AppState {
-            engine,
+            engine: Arc::clone(&engine),
             coordinator: None,
             cluster_config: ClusterConfig::default(),
+            query_cache: Arc::new(QueryCache::new()),
+            alert_checker: Arc::new(AlertChecker::new(engine)),
         });
         let app = build_router(state);
 

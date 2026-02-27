@@ -1,5 +1,13 @@
 use super::value::{DataType, Value};
 use crate::storage::dictionary::StringDictionary;
+use crate::storage::compression::{
+    CompressionType, CompressedData,
+    bitpack::BitPackCompressor,
+    delta::DeltaCompressor,
+    rle::RleCompressor,
+    lz4::Lz4Compressor,
+    select_compression,
+};
 use std::sync::Arc;
 
 /// Columnar storage for efficient memory usage and cache locality
@@ -22,6 +30,15 @@ pub enum Column {
     },
     /// Timestamp column (epoch milliseconds)
     Timestamp(Vec<Option<i64>>),
+    /// Compressed column (for sealed shards)
+    Compressed {
+        /// Original data type
+        data_type: DataType,
+        /// Compressed data
+        data: CompressedData,
+        /// Dictionary for string columns (if applicable)
+        dictionary: Option<Arc<StringDictionary>>,
+    },
 }
 
 impl Column {
@@ -61,6 +78,7 @@ impl Column {
             Column::Float64(_) => DataType::Float64,
             Column::String { .. } => DataType::String,
             Column::Timestamp(_) => DataType::Timestamp,
+            Column::Compressed { data_type, .. } => *data_type,
         }
     }
 
@@ -72,11 +90,17 @@ impl Column {
             Column::Float64(v) => v.len(),
             Column::String { ids, .. } => ids.len(),
             Column::Timestamp(v) => v.len(),
+            Column::Compressed { data, .. } => data.len,
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Check if this column is compressed
+    pub fn is_compressed(&self) -> bool {
+        matches!(self, Column::Compressed { .. })
     }
 
     /// Push a value to the column
@@ -104,6 +128,10 @@ impl Column {
             (Column::Float64(v), _) => v.push(None),
             (Column::String { ids, .. }, _) => ids.push(None),
             (Column::Timestamp(v), _) => v.push(None),
+            // Compressed columns are read-only
+            (Column::Compressed { .. }, _) => {
+                panic!("Cannot push to compressed column")
+            }
         }
     }
 
@@ -137,6 +165,135 @@ impl Column {
                 .and_then(|v| *v)
                 .map(Value::Timestamp)
                 .unwrap_or(Value::Null),
+            Column::Compressed { data_type, data, dictionary } => {
+                self.get_compressed(index, *data_type, data, dictionary.as_ref())
+            }
+        }
+    }
+
+    /// Get value from compressed column (internal helper)
+    fn get_compressed(
+        &self,
+        index: usize,
+        data_type: DataType,
+        data: &CompressedData,
+        dictionary: Option<&Arc<StringDictionary>>,
+    ) -> Value {
+        if index >= data.len {
+            return Value::Null;
+        }
+
+        // Decompress based on algorithm and data type
+        match (data.algorithm, data_type) {
+            (CompressionType::BitPack, DataType::Bool) => {
+                let compressor = BitPackCompressor::new();
+                let values = compressor.unpack_optional_bools(&data.data).unwrap_or_default();
+                values.get(index).copied().flatten().map(Value::Bool).unwrap_or(Value::Null)
+            }
+            (CompressionType::Delta, DataType::Int64) |
+            (CompressionType::Delta, DataType::Timestamp) => {
+                let compressor = DeltaCompressor::new();
+                let values = compressor.decode_optional_i64(&data.data, data.len).unwrap_or_default();
+                let val = values.get(index).copied().flatten();
+                match data_type {
+                    DataType::Timestamp => val.map(Value::Timestamp).unwrap_or(Value::Null),
+                    _ => val.map(Value::Int64).unwrap_or(Value::Null),
+                }
+            }
+            (CompressionType::Rle, DataType::String) => {
+                let compressor = RleCompressor::new();
+                let ids = compressor.decode_string_ids(&data.data).unwrap_or_default();
+                ids.get(index)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| dictionary.and_then(|d| d.get_string(id)))
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
+            }
+            (CompressionType::Lz4, _) => {
+                // LZ4 requires full decompression - cache this in real implementation
+                let compressor = Lz4Compressor::new();
+                if let Ok(decompressed) = compressor.decompress_data(&data.data) {
+                    self.get_from_decompressed(&decompressed, index, data_type, dictionary)
+                } else {
+                    Value::Null
+                }
+            }
+            _ => Value::Null,
+        }
+    }
+
+    /// Get value from decompressed bytes
+    fn get_from_decompressed(
+        &self,
+        bytes: &[u8],
+        index: usize,
+        data_type: DataType,
+        dictionary: Option<&Arc<StringDictionary>>,
+    ) -> Value {
+        match data_type {
+            DataType::Bool => {
+                if index < bytes.len() {
+                    match bytes[index] {
+                        0 => Value::Null,
+                        1 => Value::Bool(false),
+                        2 => Value::Bool(true),
+                        _ => Value::Null,
+                    }
+                } else {
+                    Value::Null
+                }
+            }
+            DataType::Int64 | DataType::Timestamp => {
+                let offset = index * 9; // 1 byte null flag + 8 bytes value
+                if offset + 9 <= bytes.len() {
+                    let is_null = bytes[offset] == 1;
+                    if is_null {
+                        Value::Null
+                    } else {
+                        let val = i64::from_le_bytes(bytes[offset + 1..offset + 9].try_into().unwrap_or([0; 8]));
+                        if data_type == DataType::Timestamp {
+                            Value::Timestamp(val)
+                        } else {
+                            Value::Int64(val)
+                        }
+                    }
+                } else {
+                    Value::Null
+                }
+            }
+            DataType::Float64 => {
+                let offset = index * 9;
+                if offset + 9 <= bytes.len() {
+                    let is_null = bytes[offset] == 1;
+                    if is_null {
+                        Value::Null
+                    } else {
+                        let val = f64::from_le_bytes(bytes[offset + 1..offset + 9].try_into().unwrap_or([0; 8]));
+                        Value::Float64(val)
+                    }
+                } else {
+                    Value::Null
+                }
+            }
+            DataType::String => {
+                let offset = index * 5; // 1 byte null + 4 bytes id
+                if offset + 5 <= bytes.len() {
+                    let is_null = bytes[offset] == 1;
+                    if is_null {
+                        Value::Null
+                    } else {
+                        let id = u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap_or([0; 4]));
+                        dictionary
+                            .and_then(|d| d.get_string(id))
+                            .map(Value::String)
+                            .unwrap_or(Value::Null)
+                    }
+                } else {
+                    Value::Null
+                }
+            }
+            DataType::Null => Value::Null,
         }
     }
 
@@ -151,7 +308,140 @@ impl Column {
                 ids.capacity() * std::mem::size_of::<Option<u32>>() + dictionary.memory_usage()
             }
             Column::Timestamp(v) => v.capacity() * std::mem::size_of::<Option<i64>>(),
+            Column::Compressed { data, dictionary, .. } => {
+                data.memory_usage() + dictionary.as_ref().map(|d| d.memory_usage()).unwrap_or(0)
+            }
         }
+    }
+
+    /// Compress this column and return a new compressed column
+    pub fn compress(&self) -> Column {
+        let values: Vec<Value> = self.iter().collect();
+        let compression_type = select_compression(&values);
+
+        match (self, compression_type) {
+            (Column::Bool(v), CompressionType::BitPack) => {
+                let compressor = BitPackCompressor::new();
+                let packed = compressor.pack_optional_bools(v);
+                let original_size = v.len() * std::mem::size_of::<Option<bool>>();
+                Column::Compressed {
+                    data_type: DataType::Bool,
+                    data: CompressedData::new(CompressionType::BitPack, v.len(), packed, original_size),
+                    dictionary: None,
+                }
+            }
+            (Column::Int64(v), CompressionType::Delta) => {
+                let compressor = DeltaCompressor::new();
+                let encoded = compressor.encode_optional_i64(v);
+                let original_size = v.len() * std::mem::size_of::<Option<i64>>();
+                Column::Compressed {
+                    data_type: DataType::Int64,
+                    data: CompressedData::new(CompressionType::Delta, v.len(), encoded, original_size),
+                    dictionary: None,
+                }
+            }
+            (Column::Timestamp(v), CompressionType::Delta) => {
+                let compressor = DeltaCompressor::new();
+                let encoded = compressor.encode_optional_i64(v);
+                let original_size = v.len() * std::mem::size_of::<Option<i64>>();
+                Column::Compressed {
+                    data_type: DataType::Timestamp,
+                    data: CompressedData::new(CompressionType::Delta, v.len(), encoded, original_size),
+                    dictionary: None,
+                }
+            }
+            (Column::String { ids, dictionary }, CompressionType::Rle) => {
+                let compressor = RleCompressor::new();
+                let encoded = compressor.encode_string_ids(ids);
+                let original_size = ids.len() * std::mem::size_of::<Option<u32>>();
+                Column::Compressed {
+                    data_type: DataType::String,
+                    data: CompressedData::new(CompressionType::Rle, ids.len(), encoded, original_size),
+                    dictionary: Some(Arc::clone(dictionary)),
+                }
+            }
+            // Default to LZ4 for other cases
+            _ => {
+                let bytes = self.to_bytes();
+                let original_size = bytes.len();
+                let compressor = Lz4Compressor::new();
+                let compressed = compressor.compress_data(&bytes);
+                Column::Compressed {
+                    data_type: self.data_type(),
+                    data: CompressedData::new(CompressionType::Lz4, self.len(), compressed, original_size),
+                    dictionary: if let Column::String { dictionary, .. } = self {
+                        Some(Arc::clone(dictionary))
+                    } else {
+                        None
+                    },
+                }
+            }
+        }
+    }
+
+    /// Serialize column to bytes (for LZ4 compression)
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        match self {
+            Column::Null(n) => {
+                bytes.extend_from_slice(&(*n as u64).to_le_bytes());
+            }
+            Column::Bool(v) => {
+                for val in v {
+                    match val {
+                        None => bytes.push(0),
+                        Some(false) => bytes.push(1),
+                        Some(true) => bytes.push(2),
+                    }
+                }
+            }
+            Column::Int64(v) | Column::Timestamp(v) => {
+                for val in v {
+                    match val {
+                        None => {
+                            bytes.push(1); // null flag
+                            bytes.extend_from_slice(&0i64.to_le_bytes());
+                        }
+                        Some(n) => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            Column::Float64(v) => {
+                for val in v {
+                    match val {
+                        None => {
+                            bytes.push(1);
+                            bytes.extend_from_slice(&0f64.to_le_bytes());
+                        }
+                        Some(n) => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            Column::String { ids, .. } => {
+                for id in ids {
+                    match id {
+                        None => {
+                            bytes.push(1);
+                            bytes.extend_from_slice(&0u32.to_le_bytes());
+                        }
+                        Some(n) => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            Column::Compressed { data, .. } => {
+                bytes.extend_from_slice(&data.data);
+            }
+        }
+        bytes
     }
 
     /// Create an iterator over column values

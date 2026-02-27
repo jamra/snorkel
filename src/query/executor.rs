@@ -24,6 +24,24 @@ pub struct QueryResult {
     pub shards_scanned: usize,
     /// Execution time in milliseconds
     pub execution_time_ms: u64,
+    /// Data availability metrics
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<AvailabilityMetrics>,
+}
+
+/// Metrics about data availability for the query
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct AvailabilityMetrics {
+    /// Percentage of nodes that responded (0.0 - 100.0)
+    pub availability_percent: f64,
+    /// Number of nodes queried
+    pub nodes_queried: usize,
+    /// Number of nodes that responded
+    pub nodes_responded: usize,
+    /// Staleness: age of oldest data point in milliseconds
+    pub staleness_ms: Option<i64>,
+    /// Whether all requested data is available
+    pub complete: bool,
 }
 
 impl QueryResult {
@@ -34,11 +52,18 @@ impl QueryResult {
             rows_scanned: 0,
             shards_scanned: 0,
             execution_time_ms: 0,
+            availability: None,
         }
     }
 
     pub fn row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Add availability metrics to the result
+    pub fn with_availability(mut self, availability: AvailabilityMetrics) -> Self {
+        self.availability = Some(availability);
+        self
     }
 }
 
@@ -80,12 +105,22 @@ pub fn execute_query(engine: &StorageEngine, plan: &QueryPlan) -> Result<QueryRe
 
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
+    // Local queries have 100% availability
+    let availability = AvailabilityMetrics {
+        availability_percent: 100.0,
+        nodes_queried: 1,
+        nodes_responded: 1,
+        staleness_ms: None, // Could compute from oldest data timestamp
+        complete: true,
+    };
+
     Ok(QueryResult {
         columns,
         rows,
         rows_scanned,
         shards_scanned,
         execution_time_ms,
+        availability: Some(availability),
     })
 }
 

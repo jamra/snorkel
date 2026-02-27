@@ -34,8 +34,10 @@ const App = {
         this.elements = {
             btnVisual: document.getElementById('btn-visual'),
             btnQuery: document.getElementById('btn-query'),
+            btnForms: document.getElementById('btn-forms'),
             sidebarVisual: document.getElementById('sidebar-visual'),
             sidebarQuery: document.getElementById('sidebar-query'),
+            sidebarForms: document.getElementById('sidebar-forms'),
             visualContent: document.getElementById('visual-content'),
             queryContent: document.getElementById('query-content'),
             tableSelect: document.getElementById('table-select'),
@@ -65,6 +67,7 @@ const App = {
     bindEvents() {
         this.elements.btnVisual.addEventListener('click', () => this.setViewMode('visual'));
         this.elements.btnQuery.addEventListener('click', () => this.setViewMode('query'));
+        this.elements.btnForms.addEventListener('click', () => this.setViewMode('forms'));
         this.elements.tableSelect.addEventListener('change', (e) => this.onTableChange(e.target.value));
         this.elements.btnAddFilter.addEventListener('click', () => this.addFilter());
         this.elements.timeRange.addEventListener('change', (e) => {
@@ -401,10 +404,12 @@ const App = {
         this.state.viewMode = mode;
         this.elements.btnVisual.classList.toggle('active', mode === 'visual');
         this.elements.btnQuery.classList.toggle('active', mode === 'query');
+        this.elements.btnForms.classList.toggle('active', mode === 'forms');
         this.elements.sidebarVisual.classList.toggle('active', mode === 'visual');
         this.elements.sidebarQuery.classList.toggle('active', mode === 'query');
+        this.elements.sidebarForms.classList.toggle('active', mode === 'forms');
         this.elements.visualContent.classList.toggle('active', mode === 'visual');
-        this.elements.queryContent.classList.toggle('active', mode === 'query');
+        this.elements.queryContent.classList.toggle('active', mode === 'query' || mode === 'forms');
 
         if (mode === 'visual') {
             ChartManager.resize();

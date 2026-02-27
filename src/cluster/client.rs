@@ -98,6 +98,7 @@ impl ClusterClient {
             rows_scanned: result.rows_scanned,
             shards_scanned: result.shards_scanned,
             execution_time_ms: result.execution_time_ms,
+            availability: None, // Will be populated by coordinator
         })
     }
 

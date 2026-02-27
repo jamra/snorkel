@@ -520,6 +520,193 @@
         .data-table tr:hover td {
             background: var(--bg-secondary);
         }
+
+        /* Forms panel styles */
+        .forms-panel {
+            display: none;
+        }
+
+        .forms-panel.active {
+            display: block;
+        }
+
+        .forms-header {
+            margin-bottom: 16px;
+        }
+
+        .forms-header h3 {
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .forms-description {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .forms-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            background: var(--bg-primary);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+            border: 1px solid transparent;
+        }
+
+        .form-card:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--border);
+        }
+
+        .form-card-icon {
+            font-size: 18px;
+        }
+
+        .form-card-content {
+            flex: 1;
+        }
+
+        .form-card-name {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .form-card-desc {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .form-builder-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .btn-back {
+            padding: 4px 8px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .btn-back:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .form-builder-title {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .form-fields {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .form-field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .form-input {
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .form-preview {
+            margin-bottom: 12px;
+            max-height: 200px;
+            overflow: auto;
+        }
+
+        .sql-preview {
+            background: var(--bg-primary);
+            padding: 12px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            margin: 0;
+        }
+
+        .sql-keyword {
+            color: #ff79c6;
+        }
+
+        .sql-function {
+            color: #8be9fd;
+        }
+
+        .sql-number {
+            color: #bd93f9;
+        }
+
+        .sql-string {
+            color: #f1fa8c;
+        }
+
+        .preview-error {
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-style: italic;
+            padding: 12px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-secondary {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-primary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
     </style>
 </head>
 <body>
@@ -529,6 +716,7 @@
             <div class="view-toggle">
                 <button id="btn-visual" class="active">Visual Builder</button>
                 <button id="btn-query">SQL Query</button>
+                <button id="btn-forms">Templates</button>
             </div>
         </header>
 
@@ -602,6 +790,12 @@
             </div>
         </aside>
 
+        <aside class="sidebar forms-panel" id="sidebar-forms">
+            <div id="forms-panel">
+                <!-- Populated by query-forms.js -->
+            </div>
+        </aside>
+
         <main class="main">
             <div class="visual-mode active" id="visual-content">
                 <div class="chart-controls">
@@ -650,6 +844,7 @@
 
     <script src="/ui/query-builder.js?v=5"></script>
     <script src="/ui/chart.js?v=5"></script>
+    <script src="/ui/query-forms.js?v=1"></script>
     <script src="/ui/app.js?v=5"></script>
 </body>
 </html>

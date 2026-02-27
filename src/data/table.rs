@@ -19,6 +19,8 @@ pub struct TableConfig {
     pub subsample_threshold_ms: i64,
     /// Subsample ratio (e.g., 0.01 = keep 1% of rows)
     pub subsample_ratio: f64,
+    /// Default sample rate for ingest (1.0 = keep all, 0.1 = keep 10%)
+    pub default_sample_rate: f64,
 }
 
 impl Default for TableConfig {
@@ -30,6 +32,7 @@ impl Default for TableConfig {
             max_memory_bytes: 1024 * 1024 * 1024,  // 1 GB
             subsample_threshold_ms: 6 * 3600 * 1000, // 6 hours
             subsample_ratio: 0.01,                 // 1%
+            default_sample_rate: 1.0,              // Keep all data by default
         }
     }
 }

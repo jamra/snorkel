@@ -1,9 +1,11 @@
 pub mod aggregates;
+pub mod cache;
 pub mod executor;
 pub mod parser;
 pub mod planner;
 
-pub use executor::{execute_query, ExecuteError, QueryResult};
+pub use cache::{QueryCache, CacheStats};
+pub use executor::{execute_query, ExecuteError, QueryResult, AvailabilityMetrics};
 pub use parser::{parse_query, ParseError, ParsedQuery};
 pub use planner::{plan_query, PlanError, QueryPlan};
 
