@@ -6,6 +6,7 @@ const ChartManager = {
     onBrushSelection: null,
     lastDataLength: 0,
     zoomDebounceTimer: null,
+    threshold: null, // { value: number, type: 'above' | 'below' }
 
     init(container, onBrushSelection) {
         console.log('ChartManager.init called, container:', container);
@@ -86,6 +87,73 @@ const ChartManager = {
 
     setType(type) {
         this.chartType = type;
+    },
+
+    // Set threshold for visualization
+    // type: 'above' = shade area above threshold (alert when > threshold)
+    //       'below' = shade area below threshold (alert when < threshold)
+    setThreshold(value, type = 'above') {
+        if (value === null || value === undefined || value === '') {
+            this.threshold = null;
+        } else {
+            this.threshold = { value: parseFloat(value), type };
+        }
+    },
+
+    clearThreshold() {
+        this.threshold = null;
+    },
+
+    // Build threshold markLine and markArea for ECharts
+    buildThresholdMarks(yMin, yMax) {
+        if (!this.threshold) return {};
+
+        const { value, type } = this.threshold;
+        const alertColor = 'rgba(233, 69, 96, 0.15)'; // Red tint for alert zone
+        const safeColor = 'rgba(74, 222, 128, 0.08)'; // Green tint for safe zone
+
+        // markLine: the threshold line itself
+        const markLine = {
+            silent: true,
+            symbol: 'none',
+            lineStyle: {
+                color: '#e94560',
+                width: 2,
+                type: 'dashed'
+            },
+            label: {
+                show: true,
+                position: 'insideEndTop',
+                formatter: `Threshold: ${value}`,
+                color: '#e94560',
+                fontSize: 11
+            },
+            data: [{ yAxis: value }]
+        };
+
+        // markArea: shade the alert zone
+        let markArea;
+        if (type === 'above') {
+            // Alert when above threshold - shade area above
+            markArea = {
+                silent: true,
+                data: [[
+                    { yAxis: value, itemStyle: { color: alertColor } },
+                    { yAxis: yMax * 1.1 } // Extend slightly above max
+                ]]
+            };
+        } else {
+            // Alert when below threshold - shade area below
+            markArea = {
+                silent: true,
+                data: [[
+                    { yAxis: yMin > 0 ? 0 : yMin * 1.1 },
+                    { yAxis: value, itemStyle: { color: alertColor } }
+                ]]
+            };
+        }
+
+        return { markLine, markArea };
     },
 
     update(rows, columns) {
@@ -177,16 +245,30 @@ const ChartManager = {
             }).join(' | '))
             : rows.map((_, i) => `#${i+1}`);
 
+        // Calculate min/max for threshold marks
+        const allValues = metrics.flatMap(m => rows.map(r => r[m.idx])).filter(v => v != null);
+        const yMin = Math.min(...allValues);
+        const yMax = Math.max(...allValues);
+        const thresholdMarks = this.buildThresholdMarks(yMin, yMax);
+
         // Create series for each metric
-        const series = metrics.map((m, i) => ({
-            name: m.name,
-            type: this.chartType === 'area' ? 'line' : this.chartType,
-            areaStyle: this.chartType === 'area' ? { opacity: 0.4 } : undefined,
-            data: rows.map(r => r[m.idx]),
-            itemStyle: {
-                borderRadius: this.chartType === 'bar' ? [3, 3, 0, 0] : 0
+        const series = metrics.map((m, i) => {
+            const seriesConfig = {
+                name: m.name,
+                type: this.chartType === 'area' ? 'line' : this.chartType,
+                areaStyle: this.chartType === 'area' ? { opacity: 0.4 } : undefined,
+                data: rows.map(r => r[m.idx]),
+                itemStyle: {
+                    borderRadius: this.chartType === 'bar' ? [3, 3, 0, 0] : 0
+                }
+            };
+            // Add threshold marks to first series only
+            if (i === 0 && this.threshold) {
+                seriesConfig.markLine = thresholdMarks.markLine;
+                seriesConfig.markArea = thresholdMarks.markArea;
             }
-        }));
+            return seriesConfig;
+        });
 
         return {
             backgroundColor: 'transparent',
@@ -263,15 +345,29 @@ const ChartManager = {
             dataMap[x][s] = v;
         });
 
+        // Calculate min/max for threshold marks
+        const allValues = rows.map(r => r[metric.idx]).filter(v => v != null);
+        const yMin = Math.min(...allValues);
+        const yMax = Math.max(...allValues);
+        const thresholdMarks = this.buildThresholdMarks(yMin, yMax);
+
         // Create a series for each unique value in the second dimension
-        const series = seriesValues.map((sv, i) => ({
-            name: sv,
-            type: 'line',
-            areaStyle: this.chartType === 'area' ? { opacity: 0.4 } : undefined,
-            data: xValues.map(x => dataMap[x]?.[sv] ?? null),
-            smooth: true,
-            connectNulls: true
-        }));
+        const series = seriesValues.map((sv, i) => {
+            const seriesConfig = {
+                name: sv,
+                type: 'line',
+                areaStyle: this.chartType === 'area' ? { opacity: 0.4 } : undefined,
+                data: xValues.map(x => dataMap[x]?.[sv] ?? null),
+                smooth: true,
+                connectNulls: true
+            };
+            // Add threshold marks to first series only
+            if (i === 0 && this.threshold) {
+                seriesConfig.markLine = thresholdMarks.markLine;
+                seriesConfig.markArea = thresholdMarks.markArea;
+            }
+            return seriesConfig;
+        });
 
         return {
             backgroundColor: 'transparent',

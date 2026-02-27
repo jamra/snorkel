@@ -60,7 +60,11 @@ const App = {
             tablesList: document.getElementById('tables-list'),
             exampleQueries: document.getElementById('example-queries'),
             statusMessage: document.getElementById('status-message'),
-            statusStats: document.getElementById('status-stats')
+            statusStats: document.getElementById('status-stats'),
+            thresholdValue: document.getElementById('threshold-value'),
+            thresholdType: document.getElementById('threshold-type'),
+            btnApplyThreshold: document.getElementById('btn-apply-threshold'),
+            btnClearThreshold: document.getElementById('btn-clear-threshold')
         };
     },
 
@@ -96,8 +100,36 @@ const App = {
             }
         });
 
+        // Threshold controls
+        this.elements.btnApplyThreshold.addEventListener('click', () => this.applyThreshold());
+        this.elements.btnClearThreshold.addEventListener('click', () => this.clearThreshold());
+        this.elements.thresholdValue.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') this.applyThreshold();
+        });
+
         // Set default chart type
         this.setChartType('bar');
+    },
+
+    applyThreshold() {
+        const value = this.elements.thresholdValue.value;
+        const type = this.elements.thresholdType.value;
+        if (value !== '') {
+            ChartManager.setThreshold(value, type);
+            if (this.state.lastResults) {
+                ChartManager.update(this.state.lastResults.rows, this.state.lastResults.columns);
+            }
+            this.updateStatus(`Threshold set: ${type} ${value}`);
+        }
+    },
+
+    clearThreshold() {
+        ChartManager.clearThreshold();
+        this.elements.thresholdValue.value = '';
+        if (this.state.lastResults) {
+            ChartManager.update(this.state.lastResults.rows, this.state.lastResults.columns);
+        }
+        this.updateStatus('Threshold cleared');
     },
 
     initChart() {
