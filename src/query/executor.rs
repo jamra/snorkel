@@ -125,13 +125,38 @@ pub fn execute_query(engine: &StorageEngine, plan: &QueryPlan) -> Result<QueryRe
 }
 
 fn get_relevant_shards(table: &Table, plan: &QueryPlan) -> Vec<Arc<Shard>> {
-    if let Some(time_range) = &plan.time_range {
+    let shards = if let Some(time_range) = &plan.time_range {
         let start = time_range.start.unwrap_or(i64::MIN);
         let end = time_range.end.unwrap_or(i64::MAX);
         table.get_shards_in_range(start, end)
     } else {
         table.get_shards()
+    };
+
+    // Use bloom filters to prune shards that definitely don't match equality filters
+    if plan.filters.is_empty() {
+        return shards;
     }
+
+    shards
+        .into_iter()
+        .filter(|shard| shard_might_match_filters(shard, &plan.filters))
+        .collect()
+}
+
+/// Check if a shard might contain rows matching the filters using bloom filters.
+/// Returns false only if we can definitively prove the shard has no matching rows.
+fn shard_might_match_filters(shard: &Arc<Shard>, filters: &[FilterPlan]) -> bool {
+    for filter in filters {
+        // Only use bloom filters for equality checks
+        if matches!(filter.operator, FilterOperator::Eq) {
+            if !shard.might_contain_value(&filter.column, &filter.value) {
+                // Bloom filter says this value is definitely not in this shard
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn expand_wildcards(projections: &[ProjectionPlan], table: &Table) -> Vec<ProjectionPlan> {
