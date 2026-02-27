@@ -19,6 +19,10 @@
 //! - KAFKA_GROUP_ID: Consumer group ID (default: snorkel)
 //! - KAFKA_AUTO_OFFSET_RESET: Where to start if no offset (earliest/latest, default: earliest)
 //!
+//! Persistence (optional):
+//! - SNORKEL_DATA_DIR: Directory for snapshots (enables persistence)
+//! - SNORKEL_SNAPSHOT_INTERVAL: Snapshot interval in seconds (default: 300)
+//!
 //! In cluster mode, put a load balancer in front to distribute queries across all nodes.
 
 use snorkel::api::{run_server, ServerConfig};
@@ -76,6 +80,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         is_coordinator: true, // Ignored - all nodes can coordinate in symmetric mode
     };
 
+    // Parse persistence configuration
+    let data_dir = std::env::var("SNORKEL_DATA_DIR")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let snapshot_interval_secs: u64 = std::env::var("SNORKEL_SNAPSHOT_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300); // 5 minutes default
+
     let config = ServerConfig {
         host,
         port,
@@ -83,6 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ttl_check_interval_secs: 60,
         subsample_check_interval_secs: 300,
         cluster_config,
+        data_dir,
+        snapshot_interval_secs,
     };
 
     tracing::info!("Snorkel configuration:");
@@ -112,6 +127,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("  Note: Put a load balancer in front to distribute queries");
     } else {
         tracing::info!("  Cluster mode: DISABLED (single node)");
+    }
+
+    // Persistence info
+    if let Some(ref dir) = config.data_dir {
+        tracing::info!("  Persistence: ENABLED");
+        tracing::info!("    Data directory: {}", dir.display());
+        tracing::info!("    Snapshot interval: {} seconds", config.snapshot_interval_secs);
+    } else {
+        tracing::info!("  Persistence: DISABLED (set SNORKEL_DATA_DIR to enable)");
     }
 
     println!(
