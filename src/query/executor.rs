@@ -1,8 +1,9 @@
 use super::aggregates::{create_accumulator, Accumulator};
-use super::parser::FilterOperator;
+use super::parser::{AggregateFunction, FilterOperator};
 use super::planner::{
     FilterPlan, GroupByColumnPlan, GroupByPlan, OrderByPlan, ProjectionPlan, QueryPlan,
 };
+use super::simd_agg::AggregateStats;
 use crate::data::column::Column;
 use crate::data::{Shard, Table, Value};
 use crate::storage::StorageEngine;
@@ -88,7 +89,12 @@ pub fn execute_query(engine: &StorageEngine, plan: &QueryPlan) -> Result<QueryRe
         .any(|p| matches!(p, ProjectionPlan::Aggregate { .. }));
 
     let (columns, mut rows, rows_scanned) = if has_aggregations {
-        execute_aggregation(&shards, plan, &projections)?
+        // Check if we can use the fast SIMD path (no GROUP BY, simple filters)
+        if plan.group_by.is_none() && can_use_simd_aggregation(&projections) {
+            execute_simd_aggregation(&shards, plan, &projections)?
+        } else {
+            execute_aggregation(&shards, plan, &projections)?
+        }
     } else {
         execute_scan(&shards, plan, &projections)?
     };
@@ -157,6 +163,126 @@ fn shard_might_match_filters(shard: &Arc<Shard>, filters: &[FilterPlan]) -> bool
         }
     }
     true
+}
+
+/// Check if we can use the fast SIMD aggregation path
+fn can_use_simd_aggregation(projections: &[ProjectionPlan]) -> bool {
+    // Only use SIMD for simple aggregates (COUNT, SUM, AVG, MIN, MAX)
+    projections.iter().all(|p| {
+        matches!(
+            p,
+            ProjectionPlan::Aggregate {
+                function: AggregateFunction::Count
+                    | AggregateFunction::Sum
+                    | AggregateFunction::Avg
+                    | AggregateFunction::Min
+                    | AggregateFunction::Max,
+                ..
+            }
+        )
+    })
+}
+
+/// Execute aggregation using SIMD-friendly functions (no GROUP BY)
+fn execute_simd_aggregation(
+    shards: &[Arc<Shard>],
+    plan: &QueryPlan,
+    projections: &[ProjectionPlan],
+) -> Result<(Vec<String>, Vec<Vec<Value>>, usize), ExecuteError> {
+    let columns: Vec<String> = projections
+        .iter()
+        .map(|p| match p {
+            ProjectionPlan::Aggregate { output_name, .. } => output_name.clone(),
+            _ => String::new(),
+        })
+        .collect();
+
+    // Parallel aggregation across shards using SIMD-friendly AggregateStats
+    let partial_results: Vec<(Vec<AggregateStats>, usize)> = shards
+        .par_iter()
+        .map(|shard| {
+            shard.with_columns(|shard_columns| {
+                let row_count = shard.row_count();
+
+                // If there are filters, we need to compute matching row indices
+                let matching_indices: Option<Vec<usize>> = if !plan.filters.is_empty() {
+                    let indices: Vec<usize> = (0..row_count)
+                        .filter(|&row_idx| passes_filters_unlocked(shard_columns, row_idx, &plan.filters))
+                        .collect();
+                    Some(indices)
+                } else {
+                    None
+                };
+
+                // Compute stats for each projection
+                let stats: Vec<AggregateStats> = projections
+                    .iter()
+                    .map(|proj| {
+                        if let ProjectionPlan::Aggregate { column, .. } = proj {
+                            if let Some(col_name) = column {
+                                if let Some(col) = shard_columns.get(col_name) {
+                                    if let Some(ref indices) = matching_indices {
+                                        col.aggregate_stats_filtered(indices)
+                                    } else {
+                                        col.aggregate_stats()
+                                    }
+                                } else {
+                                    AggregateStats::default()
+                                }
+                            } else {
+                                // COUNT(*)
+                                let count = matching_indices.as_ref().map(|i| i.len()).unwrap_or(row_count);
+                                AggregateStats {
+                                    sum: count as f64,
+                                    count,
+                                    min: None,
+                                    max: None,
+                                }
+                            }
+                        } else {
+                            AggregateStats::default()
+                        }
+                    })
+                    .collect();
+
+                let scanned = matching_indices.as_ref().map(|i| i.len()).unwrap_or(row_count);
+                (stats, scanned)
+            })
+        })
+        .collect();
+
+    // Merge stats from all shards
+    let mut merged_stats: Vec<AggregateStats> = projections.iter().map(|_| AggregateStats::default()).collect();
+    let mut rows_scanned = 0;
+
+    for (shard_stats, scanned) in partial_results {
+        rows_scanned += scanned;
+        for (i, stats) in shard_stats.into_iter().enumerate() {
+            merged_stats[i].merge(&stats);
+        }
+    }
+
+    // Build result row based on aggregate functions
+    let row: Vec<Value> = projections
+        .iter()
+        .zip(merged_stats.iter())
+        .map(|(proj, stats)| {
+            if let ProjectionPlan::Aggregate { function, .. } = proj {
+                match function {
+                    AggregateFunction::Count => Value::Int64(stats.count as i64),
+                    AggregateFunction::Sum => Value::Float64(stats.sum),
+                    AggregateFunction::Avg => stats.avg().map(Value::Float64).unwrap_or(Value::Null),
+                    AggregateFunction::Min => stats.min.map(Value::Float64).unwrap_or(Value::Null),
+                    AggregateFunction::Max => stats.max.map(Value::Float64).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                }
+            } else {
+                Value::Null
+            }
+        })
+        .collect();
+
+    Ok((columns, vec![row], rows_scanned))
 }
 
 fn expand_wildcards(projections: &[ProjectionPlan], table: &Table) -> Vec<ProjectionPlan> {
