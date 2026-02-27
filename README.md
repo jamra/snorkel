@@ -122,26 +122,36 @@ Environment variables:
 | `SNORKEL_PORT` | `8080` | Server port |
 | `SNORKEL_MAX_MEMORY_MB` | `1024` | Maximum memory usage |
 
-### Cluster Mode
+### Cluster Mode (Symmetric)
 
-Run multiple nodes for horizontal scaling:
+Run multiple nodes for horizontal scaling. All nodes are equal - any node can coordinate queries.
 
 ```bash
-# Node 1 (Coordinator)
+# Node 1
 SNORKEL_PORT=9000 \
 SNORKEL_NODE_ID=node-1 \
-SNORKEL_PEERS="127.0.0.1:9001,127.0.0.1:9002" \
-SNORKEL_IS_COORDINATOR=true \
+SNORKEL_PEERS="10.0.0.2:8080,10.0.0.3:8080" \
 cargo run
 
 # Node 2
-SNORKEL_PORT=9001 SNORKEL_NODE_ID=node-2 cargo run
+SNORKEL_PORT=8080 \
+SNORKEL_NODE_ID=node-2 \
+SNORKEL_PEERS="10.0.0.1:9000,10.0.0.3:8080" \
+cargo run
 
 # Node 3
-SNORKEL_PORT=9002 SNORKEL_NODE_ID=node-3 cargo run
+SNORKEL_PORT=8080 \
+SNORKEL_NODE_ID=node-3 \
+SNORKEL_PEERS="10.0.0.1:9000,10.0.0.2:8080" \
+cargo run
 ```
 
-Or use the provided scripts:
+**Key points:**
+- Each node lists all OTHER nodes as peers
+- Query any node - it will fan out to all peers and merge results
+- Put a load balancer (nginx, HAProxy, k8s Ingress) in front for production
+
+Or use the provided scripts for local testing:
 
 ```bash
 ./run_cluster.sh    # Start 3-node cluster

@@ -1,7 +1,8 @@
 #!/bin/bash
-# Start all 3 nodes in the background
+# Start a 3-node Snorkel cluster in symmetric mode
+# Any node can handle queries - put a load balancer in front for production
 
-echo "Starting Snorkel 3-node cluster..."
+echo "Starting Snorkel 3-node cluster (symmetric mode)..."
 
 # Clean up any existing processes first
 ./stop_cluster.sh 2>/dev/null
@@ -9,7 +10,11 @@ echo "Starting Snorkel 3-node cluster..."
 # Small delay to ensure ports are released
 sleep 1
 
-# Start worker nodes first
+# Start all nodes (order doesn't matter in symmetric mode)
+./run_node1.sh &
+NODE1_PID=$!
+echo "Node 1 started (PID: $NODE1_PID)"
+
 ./run_node2.sh &
 NODE2_PID=$!
 echo "Node 2 started (PID: $NODE2_PID)"
@@ -18,20 +23,20 @@ echo "Node 2 started (PID: $NODE2_PID)"
 NODE3_PID=$!
 echo "Node 3 started (PID: $NODE3_PID)"
 
-# Wait for workers to be ready
+# Wait for nodes to be ready
 sleep 2
 
-# Start coordinator (in foreground so Ctrl+C stops everything)
-echo "Starting coordinator..."
-./run_node1.sh &
-NODE1_PID=$!
-echo "Node 1 (Coordinator) started (PID: $NODE1_PID)"
-
 echo ""
-echo "Cluster is running!"
-echo "  - Coordinator: http://localhost:9000"
-echo "  - Node 2:      http://localhost:9001"
-echo "  - Node 3:      http://localhost:9002"
+echo "Cluster is running (symmetric mode - any node can coordinate)!"
+echo "  - Node 1: http://localhost:9000"
+echo "  - Node 2: http://localhost:9001"
+echo "  - Node 3: http://localhost:9002"
+echo ""
+echo "You can query any node directly, e.g.:"
+echo "  curl -X POST http://localhost:9000/query -d '{\"sql\":\"SELECT COUNT(*) FROM events\"}'"
+echo "  curl -X POST http://localhost:9001/query -d '{\"sql\":\"SELECT COUNT(*) FROM events\"}'"
+echo ""
+echo "For production, put a load balancer in front to distribute queries."
 echo ""
 echo "Press Ctrl+C to stop all nodes..."
 
