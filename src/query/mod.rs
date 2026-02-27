@@ -3,8 +3,10 @@ pub mod cache;
 pub mod executor;
 pub mod parser;
 pub mod planner;
+pub mod simd_agg;
 
 pub use cache::{QueryCache, CacheStats};
+pub use simd_agg::AggregateStats;
 pub use executor::{execute_query, ExecuteError, QueryResult, AvailabilityMetrics};
 pub use parser::{parse_query, ParseError, ParsedQuery};
 pub use planner::{plan_query, PlanError, QueryPlan};
