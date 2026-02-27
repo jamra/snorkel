@@ -11,6 +11,12 @@ const SERVICES: &[&str] = &["api", "auth", "db", "cache", "worker", "scheduler",
 const MESSAGES: &[&str] = &["Connection timeout", "Slow query", "Invalid token", "Rate limit", "High memory", "Server error", "Cache miss", "Session expired", "Bad request", "Pool exhausted"];
 const STATUS_CODES: &[i64] = &[200, 400, 401, 403, 404, 429, 500, 502, 503, 504];
 
+// Predefined scales for quick selection
+const SCALE_SMALL: (usize, usize) = (1_000, 10);       // 10K rows per table
+const SCALE_MEDIUM: (usize, usize) = (10_000, 10);     // 100K rows per table
+const SCALE_LARGE: (usize, usize) = (10_000, 100);     // 1M rows per table
+const SCALE_XLARGE: (usize, usize) = (10_000, 1_000);  // 10M rows per table
+
 fn fast_random(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
@@ -126,18 +132,39 @@ impl BenchmarkStats {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
-    let rows_per_batch: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
-    let num_batches: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+    // Support scale shortcuts: small, medium, large, xlarge
+    let (rows_per_batch, num_batches) = match args.get(1).map(|s| s.as_str()) {
+        Some("small") => SCALE_SMALL,
+        Some("medium") => SCALE_MEDIUM,
+        Some("large") => SCALE_LARGE,
+        Some("xlarge") => SCALE_XLARGE,
+        _ => {
+            let rows = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let batches = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+            (rows, batches)
+        }
+    };
+
     let host = std::env::var("SNORKEL_HOST").unwrap_or_else(|_| "localhost".to_string());
-    let port = std::env::var("SNORKEL_PORT").unwrap_or_else(|_| "9001".to_string());
+    let port = std::env::var("SNORKEL_PORT").unwrap_or_else(|_| "8080".to_string());
     let base_url = format!("http://{}:{}", host, port);
+
+    let total_rows = rows_per_batch * num_batches;
+    let scale_name = match total_rows {
+        0..=50_000 => "small",
+        50_001..=500_000 => "medium",
+        500_001..=5_000_000 => "large",
+        _ => "xlarge",
+    };
 
     println!("Snorkel Benchmark");
     println!("=================");
     println!("Target:          {}", base_url);
+    println!("Scale:           {} ({} rows/table)", scale_name, total_rows);
     println!("Rows per batch:  {}", rows_per_batch);
     println!("Batches:         {}", num_batches);
-    println!("Total rows:      {} (per table)", rows_per_batch * num_batches);
+    println!();
+    println!("Usage: benchmark [small|medium|large|xlarge] or [rows_per_batch] [num_batches]");
     println!();
 
     let client = Client::new();
@@ -323,6 +350,154 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Cache stats:         hits={}, misses={}, size={}",
             cache["hits"], cache["misses"], cache["size"]);
     }
+
+    // Bloom Filter Effectiveness
+    println!();
+    println!("Bloom Filter Effectiveness");
+    println!("==========================");
+    println!("Testing shard pruning with rare vs common value queries...");
+
+    // Query for a common value (exists in many shards)
+    let common_query = "SELECT COUNT(*) FROM web_events WHERE event = 'click'";
+    let mut common_times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": common_query }))
+            .send()
+            .await?;
+        common_times.push(start.elapsed());
+    }
+    let common_avg: Duration = common_times.iter().sum::<Duration>() / common_times.len() as u32;
+
+    // Query for a rare value (exists in few/no shards - bloom filter should prune)
+    let rare_query = "SELECT COUNT(*) FROM web_events WHERE event = 'rare_event_xyz'";
+    let mut rare_times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": rare_query }))
+            .send()
+            .await?;
+        rare_times.push(start.elapsed());
+    }
+    let rare_avg: Duration = rare_times.iter().sum::<Duration>() / rare_times.len() as u32;
+
+    println!("Common value query:  {:?} avg (scans all matching shards)", common_avg);
+    println!("Rare value query:    {:?} avg (bloom filter prunes shards)", rare_avg);
+    if common_avg > rare_avg {
+        let improvement = common_avg.as_secs_f64() / rare_avg.as_secs_f64();
+        println!("Bloom filter speedup: {:.1}x for non-existent values", improvement);
+    }
+
+    // Predicate Pushdown Effectiveness
+    println!();
+    println!("Predicate Pushdown Effectiveness");
+    println!("================================");
+
+    // Compare scan with no filter vs scan with selective filter
+    let no_filter = "SELECT COUNT(*) FROM web_events";
+    let selective_filter = "SELECT COUNT(*) FROM web_events WHERE country = 'US' AND event = 'purchase'";
+
+    let mut no_filter_times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": no_filter }))
+            .send()
+            .await?;
+        no_filter_times.push(start.elapsed());
+    }
+    let no_filter_avg: Duration = no_filter_times.iter().sum::<Duration>() / no_filter_times.len() as u32;
+
+    let mut selective_times = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let start = Instant::now();
+        let _ = client
+            .post(format!("{}/query", base_url))
+            .json(&json!({ "sql": selective_filter }))
+            .send()
+            .await?;
+        selective_times.push(start.elapsed());
+    }
+    let selective_avg: Duration = selective_times.iter().sum::<Duration>() / selective_times.len() as u32;
+
+    println!("Full scan (no filter):     {:?} avg", no_filter_avg);
+    println!("Selective filter:          {:?} avg", selective_avg);
+    println!("Note: Predicate pushdown builds row masks once vs per-row evaluation");
+
+    // Aggregation Performance Comparison
+    println!();
+    println!("Aggregation Performance");
+    println!("=======================");
+
+    let agg_queries = vec![
+        ("COUNT(*)", "SELECT COUNT(*) FROM web_events"),
+        ("SUM", "SELECT SUM(latency_ms) FROM web_events"),
+        ("AVG", "SELECT AVG(latency_ms) FROM web_events"),
+        ("MIN/MAX", "SELECT MIN(latency_ms), MAX(latency_ms) FROM web_events"),
+        ("Multi-agg (SIMD)", "SELECT COUNT(*), SUM(latency_ms), AVG(latency_ms), MIN(latency_ms), MAX(latency_ms) FROM web_events"),
+        ("GROUP BY (hash)", "SELECT event, COUNT(*) FROM web_events GROUP BY event"),
+        ("GROUP BY + aggs", "SELECT country, AVG(latency_ms), SUM(latency_ms) FROM web_events GROUP BY country"),
+    ];
+
+    for (name, sql) in &agg_queries {
+        let mut times = Vec::with_capacity(10);
+        for _ in 0..10 {
+            let start = Instant::now();
+            let _ = client
+                .post(format!("{}/query", base_url))
+                .json(&json!({ "sql": sql }))
+                .send()
+                .await?;
+            times.push(start.elapsed());
+        }
+        let avg: Duration = times.iter().sum::<Duration>() / times.len() as u32;
+        let min = *times.iter().min().unwrap();
+        println!("{:20} avg={:>8.2?} min={:>8.2?}", name, avg, min);
+    }
+
+    // Final Summary
+    println!();
+    println!("Summary");
+    println!("=======");
+
+    // Re-fetch table stats
+    let resp: Value = client
+        .get(format!("{}/tables", base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let mut total_rows_in_db = 0u64;
+    let mut total_memory = 0u64;
+    if let Some(tables) = resp["tables"].as_array() {
+        for t in tables {
+            total_rows_in_db += t["row_count"].as_u64().unwrap_or(0);
+            total_memory += t["memory_bytes"].as_u64().unwrap_or(0);
+        }
+    }
+
+    let bytes_per_row = if total_rows_in_db > 0 {
+        total_memory as f64 / total_rows_in_db as f64
+    } else {
+        0.0
+    };
+
+    println!("Total rows:          {}", total_rows_in_db);
+    println!("Total memory:        {:.2} MB", total_memory as f64 / 1024.0 / 1024.0);
+    println!("Bytes per row:       {:.1}", bytes_per_row);
+    println!();
+    println!("Optimizations enabled:");
+    println!("  - Bloom filters for shard pruning (equality filters)");
+    println!("  - Predicate pushdown with row masks");
+    println!("  - SIMD-friendly aggregations (single-pass stats)");
+    println!("  - Query result caching (TTL-based)");
+    println!("  - Parallel shard processing (rayon)");
 
     Ok(())
 }
