@@ -22,6 +22,7 @@ use crate::compaction::{SubsampleWorker, TtlWorker};
 use crate::ingest::{KafkaConfig, KafkaConsumer};
 use crate::otel::handle_otlp_traces;
 use crate::query::QueryCache;
+use crate::storage::persistence::{PersistenceConfig, SnapshotManager};
 use crate::storage::StorageEngine;
 
 // Embed UI files at compile time
@@ -41,6 +42,10 @@ pub struct ServerConfig {
     pub ttl_check_interval_secs: u64,
     pub subsample_check_interval_secs: u64,
     pub cluster_config: ClusterConfig,
+    /// Data directory for persistence (None = no persistence)
+    pub data_dir: Option<std::path::PathBuf>,
+    /// Snapshot interval in seconds (default: 300 = 5 minutes)
+    pub snapshot_interval_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -52,6 +57,8 @@ impl Default for ServerConfig {
             ttl_check_interval_secs: 60,
             subsample_check_interval_secs: 300,
             cluster_config: ClusterConfig::default(),
+            data_dir: None,
+            snapshot_interval_secs: 300,
         }
     }
 }
@@ -156,6 +163,42 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
     // Initialize storage engine
     let engine = Arc::new(StorageEngine::with_memory_limit(config.max_memory_bytes));
 
+    // Initialize persistence and restore from snapshot if configured
+    let snapshot_manager = if let Some(ref data_dir) = config.data_dir {
+        let persistence_config = PersistenceConfig::new(data_dir)
+            .with_snapshot_interval(config.snapshot_interval_secs);
+
+        match SnapshotManager::new(persistence_config) {
+            Ok(manager) => {
+                // Try to restore from latest snapshot
+                match manager.restore_latest(&engine) {
+                    Ok(Some(metadata)) => {
+                        tracing::info!(
+                            "Restored from snapshot: {} ({} tables, {} bytes)",
+                            metadata.id,
+                            metadata.tables.len(),
+                            metadata.size_bytes
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::info!("No snapshot found, starting fresh");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to restore snapshot: {}, starting fresh", e);
+                    }
+                }
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize persistence: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("Persistence disabled (set SNORKEL_DATA_DIR to enable)");
+        None
+    };
+
     // Initialize coordinator if clustering is enabled
     let coordinator = if config.cluster_config.is_distributed() {
         tracing::info!(
@@ -229,6 +272,35 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
         std::time::Duration::from_secs(config.subsample_check_interval_secs),
     ));
     let subsample_handle = Arc::clone(&subsample_worker).start();
+
+    // Start snapshot worker if persistence is enabled
+    let _snapshot_handle = if let Some(ref manager) = snapshot_manager {
+        let engine_clone = Arc::clone(&engine);
+        let manager_clone = Arc::clone(manager);
+        let interval = std::time::Duration::from_secs(config.snapshot_interval_secs);
+
+        Some(tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+            loop {
+                interval_timer.tick().await;
+                match manager_clone.create_snapshot(&engine_clone) {
+                    Ok(metadata) => {
+                        tracing::info!(
+                            "Created snapshot: {} ({} tables, {} bytes)",
+                            metadata.id,
+                            metadata.tables.len(),
+                            metadata.size_bytes
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create snapshot: {}", e);
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
 
     // Build router
     let app = build_router(state);
