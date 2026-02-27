@@ -451,6 +451,130 @@ impl Column {
             index: 0,
         }
     }
+
+    // =========================================================================
+    // SIMD-friendly accessor methods for vectorized aggregation
+    // =========================================================================
+
+    /// Get the underlying i64 slice if this is an Int64 column.
+    /// Returns None for compressed or other column types.
+    #[inline]
+    pub fn as_i64_slice(&self) -> Option<&[Option<i64>]> {
+        match self {
+            Column::Int64(v) => Some(v),
+            Column::Timestamp(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Get the underlying f64 slice if this is a Float64 column.
+    #[inline]
+    pub fn as_f64_slice(&self) -> Option<&[Option<f64>]> {
+        match self {
+            Column::Float64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Get the underlying bool slice if this is a Bool column.
+    #[inline]
+    pub fn as_bool_slice(&self) -> Option<&[Option<bool>]> {
+        match self {
+            Column::Bool(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Check if the column has any null values (for fast-path selection)
+    pub fn has_nulls(&self) -> bool {
+        match self {
+            Column::Null(n) => *n > 0,
+            Column::Bool(v) => v.iter().any(|x| x.is_none()),
+            Column::Int64(v) => v.iter().any(|x| x.is_none()),
+            Column::Float64(v) => v.iter().any(|x| x.is_none()),
+            Column::String { ids, .. } => ids.iter().any(|x| x.is_none()),
+            Column::Timestamp(v) => v.iter().any(|x| x.is_none()),
+            Column::Compressed { .. } => true, // Assume compressed may have nulls
+        }
+    }
+
+    /// Extract dense i64 values (non-null only) for SIMD aggregation.
+    /// Returns (values, count) where count is the number of non-null values.
+    #[inline]
+    pub fn collect_dense_i64(&self) -> Vec<i64> {
+        match self {
+            Column::Int64(v) => v.iter().filter_map(|x| *x).collect(),
+            Column::Timestamp(v) => v.iter().filter_map(|x| *x).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Extract dense f64 values (non-null only) for SIMD aggregation.
+    #[inline]
+    pub fn collect_dense_f64(&self) -> Vec<f64> {
+        match self {
+            Column::Float64(v) => v.iter().filter_map(|x| *x).collect(),
+            Column::Int64(v) => v.iter().filter_map(|x| *x).map(|i| i as f64).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get filtered i64 values at specific row indices
+    #[inline]
+    pub fn get_i64_at_indices(&self, indices: &[usize]) -> Vec<Option<i64>> {
+        match self {
+            Column::Int64(v) => indices.iter().filter_map(|&i| v.get(i).copied()).collect(),
+            Column::Timestamp(v) => indices.iter().filter_map(|&i| v.get(i).copied()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get filtered f64 values at specific row indices
+    #[inline]
+    pub fn get_f64_at_indices(&self, indices: &[usize]) -> Vec<Option<f64>> {
+        match self {
+            Column::Float64(v) => indices.iter().filter_map(|&i| v.get(i).copied()).collect(),
+            Column::Int64(v) => indices
+                .iter()
+                .filter_map(|&i| v.get(i).copied())
+                .map(|opt| opt.map(|i| i as f64))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Compute basic aggregate statistics using SIMD-friendly functions
+    pub fn aggregate_stats(&self) -> crate::query::simd_agg::AggregateStats {
+        use crate::query::simd_agg::AggregateStats;
+
+        match self {
+            Column::Int64(v) => AggregateStats::compute_i64(v),
+            Column::Timestamp(v) => AggregateStats::compute_i64(v),
+            Column::Float64(v) => AggregateStats::compute_f64(v),
+            _ => AggregateStats::default(),
+        }
+    }
+
+    /// Compute aggregate statistics for specific row indices
+    pub fn aggregate_stats_filtered(&self, indices: &[usize]) -> crate::query::simd_agg::AggregateStats {
+        use crate::query::simd_agg::AggregateStats;
+
+        match self {
+            Column::Int64(v) => {
+                let filtered: Vec<Option<i64>> = indices.iter().filter_map(|&i| v.get(i).copied()).collect();
+                AggregateStats::compute_i64(&filtered)
+            }
+            Column::Timestamp(v) => {
+                let filtered: Vec<Option<i64>> = indices.iter().filter_map(|&i| v.get(i).copied()).collect();
+                AggregateStats::compute_i64(&filtered)
+            }
+            Column::Float64(v) => {
+                let filtered: Vec<Option<f64>> = indices.iter().filter_map(|&i| v.get(i).copied()).collect();
+                AggregateStats::compute_f64(&filtered)
+            }
+            _ => AggregateStats::default(),
+        }
+    }
 }
 
 pub struct ColumnIter<'a> {
